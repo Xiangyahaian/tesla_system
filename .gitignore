@@ -1,0 +1,60 @@
+# ===== secrets / credentials =====
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+config.ini
+langsmith.txt
+ali.txt
+aliyun.txt
+start.txt
+常用命令.txt
+
+# ===== logs / runtime =====
+*.log
+chat.log
+vllm_tesla.log
+log/
+state/state.json
+state/memory.json
+
+# ===== python / notebooks =====
+__pycache__/
+*.py[cod]
+*$py.class
+.ipynb_checkpoints/
+._____temp/
+.lock/
+*.egg-info/
+.venv/
+venv/
+
+# ===== large local binaries / models =====
+models/
+mongodb-7.0.20/
+frp_0.61.0_linux_amd64/
+frp_0.61.0_linux_amd64.tar.gz
+*.deb
+*.tar.gz
+
+# ===== data: local DB / indexes / caches =====
+data/mongodb/
+data/saved_index/*.db
+data/saved_index/*.pkl
+data/saved_index/.milvus.db.lock
+data/**/.DS_Store
+
+# ===== RAG-Retrieval training outputs (multi-GB) =====
+RAG-Retrieval/**/output/
+RAG-Retrieval/**/runs/
+RAG-Retrieval/**/checkpoints/
+RAG-Retrieval/**/*.bin
+RAG-Retrieval/**/*.pt
+RAG-Retrieval/**/*.safetensors
+
+# ===== OS / IDE =====
+.DS_Store
+.idea/
+.vscode/
+*.swp

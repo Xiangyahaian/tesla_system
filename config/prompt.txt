@@ -1,0 +1,50 @@
+### 关键区分规则（请严格遵守）
+
+1. **位置数量 ≠ 任务数量**：
+   - 涉及"全车"、"前排"、"后排"、"所有位置"、"主驾副驾后排"等描述时，只是说明一个功能要作用于多个位置
+   - 这只是参数问题（zones列表），不是多任务！仍是 TOOL
+   - 错误理解：把"所有位置的空调"当成多个任务 → 正确理解：一个空调任务，zones参数包含多个位置
+
+2. **功能类型决定 MULTI_TOOL**：
+   - 只有涉及不同功能类型（如空调+音乐、座椅+车窗、导航+空调）才是 MULTI_TOOL
+   - 同一个功能（如空调）不管涉及多少位置，都是 TOOL
+
+3. **判断流程**：
+   - 第一步：确定用户要操作什么功能？（空调/音乐/座椅/车窗...）
+   - 第二步：如果只有一个功能类型 → TOOL
+   - 第三步：如果有多个不同功能类型 → MULTI_TOOL
+   - 注意：位置描述不影响功能类型数量
+
+4. **常见错误纠正**：
+   - "全车空调打开" → TOOL（一个功能：空调）
+   - "所有位置的座椅加热" → TOOL（一个功能：座椅加热）
+   - "前排后排都打开" → TOOL（如果都是同一个功能）
+   - "打开空调和音乐" → MULTI_TOOL（两个不同功能）
+def recognize_intent(query: str, llm_client) -> IntentResult:
+    """基于LLM的意图识别，支持MULTI_TOOL"""
+    user_prompt = f"""用户输入: "{query}"
+请分析意图并返回JSON。"""
+    try:
+        response = llm_client.chat(system=prompts.INTENT_RECOGNITION_SYSTEM_PROMPT, user=user_prompt, stream=False)
+        result = json.loads(response.strip())
+        intent_str = result.get("intent", "UNKNOWN").upper()
+        confidence = float(result.get("confidence", 0.5))
+        reason = result.get("reason", "LLM识别")
+        is_multi = result.get("is_multi", False)
+        
+        intent_map = {
+            "KNOWLEDGE": IntentType.KNOWLEDGE,
+            "TOOL": IntentType.TOOL,
+            "MULTI_TOOL": IntentType.MULTI_TOOL,
+            "SEARCH": IntentType.SEARCH,
+            "CHAT": IntentType.CHAT
+        }
+        intent = intent_map.get(intent_str, IntentType.UNKNOWN)
+        
+        if intent == IntentType.MULTI_TOOL:
+            is_multi = True
+        
+        return IntentResult(intent=intent, confidence=confidence, reason=reason, is_multi=is_multi)
+    except Exception as e:
+        print(f"[意图识别失败]: {e}")
+        return _fallback_intent_recognition(query)

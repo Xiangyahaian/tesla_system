@@ -1,0 +1,647 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>智能座舱问答系统</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <style>
+        /* 深度定制的极简风格，无图标，重排版 */
+        body { background-color: #f9fafb; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
+        .hide-scrollbar::-webkit-scrollbar { display: none; }
+        .hide-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+        
+        .markdown-body p { margin-bottom: 1em; line-height: 1.8; color: #1f2937; }
+        .markdown-body h1, .markdown-body h2, .markdown-body h3 { font-weight: 600; margin-top: 1.5em; margin-bottom: 0.5em; color: #111827; }
+        .markdown-body strong { color: #000; font-weight: 600; }
+        .markdown-body code { background: #f3f4f6; padding: 0.2em 0.4em; border-radius: 4px; font-size: 0.9em; font-family: monospace; }
+        
+        /* 检索内容卡片极简处理 */
+        .context-item { padding: 16px; margin-bottom: 12px; background: #fff; border-radius: 6px; border-left: 3px solid #e5e7eb; box-shadow: 0 1px 2px rgba(0,0,0,0.03); font-size: 0.875rem; color: #4b5563; line-height: 1.6;}
+        
+        /* 图片展示网格 */
+        .image-card { border: 1px solid #e5e7eb; border-radius: 8px; overflow: hidden; background: #fff; }
+        .image-card img { width: 100%; height: auto; object-fit: cover; display: block; }
+        .image-caption { padding: 12px; font-size: 0.875rem; color: #374151; text-align: center; border-top: 1px solid #f3f4f6;}
+        
+        /* 下拉菜单样式 */
+        .dropdown-item { 
+            padding: 8px 12px; 
+            font-size: 0.875rem; 
+            color: #374151; 
+            cursor: pointer; 
+            transition: all 0.15s;
+            border-bottom: 1px solid #f3f4f6;
+            line-height: 1.4;
+        }
+        .dropdown-item:hover { 
+            background-color: #f3f4f6; 
+            color: #111827;
+        }
+        .dropdown-item:last-child { border-bottom: none; }
+        .dropdown-section:not(:last-child) { border-bottom: 1px solid #e5e7eb; }
+        
+        /* 清空按钮样式 */
+        .clear-btn {
+            position: absolute;
+            right: 12px;
+            bottom: 12px;
+            width: 22px;
+            height: 22px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #9ca3af;
+            background: transparent;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: all 0.15s;
+            z-index: 10;
+        }
+        .clear-btn:hover {
+            color: #6b7280;
+            background: #f3f4f6;
+        }
+        .clear-btn.hidden { 
+            display: none !important; 
+        }
+        
+        /* 下拉菜单标题样式 */
+        .dropdown-header {
+            padding: 10px 12px;
+            font-size: 0.95rem;
+            font-weight: 700;
+            color: #1f2937;
+            background: #f9fafb;
+            border-bottom: 1px solid #e5e7eb;
+            cursor: pointer;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            transition: background-color 0.15s;
+        }
+        .dropdown-header:hover {
+            background-color: #f3f4f6;
+        }
+        .dropdown-header::after {
+            content: '▶';
+            font-size: 0.75rem;
+            color: #9ca3af;
+            transition: transform 0.2s;
+        }
+        .dropdown-header:hover::after {
+            color: #6b7280;
+        }
+        
+        /* 模型选择下拉框样式 + 文本溢出省略 */
+        #modelSelect {
+            min-width: 0;
+            font-size: 0.875rem;
+            background-image: none;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        #modelSelect:disabled {
+            background-color: #f3f4f6;
+            cursor: not-allowed;
+        }
+        #modelSelect option:disabled {
+            color: #9ca3af;
+            background-color: #f9fafb;
+        }
+        
+        /* 父子层级菜单样式 */
+        .menu-item {
+            position: relative;
+            border-bottom: 1px solid #e5e7eb;
+        }
+        .menu-item:last-child {
+            border-bottom: none;
+        }
+        
+        .submenu {
+            display: none;
+            width: 100%;
+            max-height: 280px;
+            overflow-y: auto;
+            background: #fafafa;
+            border-top: 1px solid #e5e7eb;
+        }
+        
+        /* 点击展开子菜单 */
+        .menu-item.expanded > .submenu {
+            display: block;
+        }
+        
+        /* 展开时箭头旋转 */
+        .menu-item.expanded > .dropdown-header::after {
+            transform: rotate(90deg);
+        }
+        
+        .submenu-item {
+            padding: 10px 14px 10px 24px;
+            font-size: 0.875rem;
+            color: #374151;
+            cursor: pointer;
+            transition: all 0.15s;
+            border-bottom: 1px solid #f0f0f0;
+            line-height: 1.5;
+            white-space: normal;
+            word-wrap: break-word;
+        }
+        .submenu-item:hover {
+            background-color: #f3f4f6;
+            color: #111827;
+        }
+        .submenu-item:last-child {
+            border-bottom: none;
+        }
+    </style>
+</head>
+<body class="h-screen w-screen flex overflow-hidden">
+
+    <div class="w-[450px] bg-white border-r border-gray-200 flex flex-col flex-shrink-0">
+        <div class="p-6 border-b border-gray-100 bg-gray-50/50">
+            <div class="flex justify-between items-center mb-4">
+                <h2 class="text-lg font-semibold text-gray-800 tracking-wider">智能座舱问答系统（By 赵梓璇）</h2>
+                <button id="resetStateBtn" 
+                    class="px-3 py-1.5 text-sm font-medium text-gray-700 bg-gray-100 border border-gray-200 rounded-lg hover:bg-gray-200 hover:text-gray-900 transition-colors">
+                    清空历史会话
+                </button>
+            </div>
+            <!-- 输入框和下拉按钮容器 -->
+            <div class="relative">
+                <textarea id="queryInput" class="w-full h-32 px-4 py-4 pr-12 pb-8 bg-white border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition-all resize-none text-gray-700 leading-relaxed placeholder-gray-400" placeholder="请输入您要查询的问题，按 Enter 发送..."></textarea>
+                
+                <!-- 下拉箭头按钮 -->
+                <button id="dropdownBtn" class="absolute right-3 top-3 p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded transition-colors" title="快速测试问题">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7" />
+                    </svg>
+                </button>
+                
+                <!-- 清空按钮 -->
+                <button id="clearBtn" class="clear-btn" title="清空输入">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                </button>
+                
+                <!-- 下拉菜单 -->
+                <div id="dropdownMenu" class="hidden absolute right-0 left-0 top-full mt-1 bg-white border border-gray-200 rounded-lg shadow-lg z-50 overflow-hidden">
+
+                    <!-- 知识问答 -->
+                    <div class="menu-item">
+                        <div class="dropdown-header">知识问答(KNOWLEDGE)</div>
+                        <div class="submenu" data-category="knowledge"></div>
+                    </div>
+                    <!-- 控制指令 -->
+                    <div class="menu-item">
+                        <div class="dropdown-header">控制指令(TOOL)</div>
+                        <div class="submenu" data-category="default"></div>
+                    </div>
+
+                    <!-- 闲聊 -->
+                    <div class="menu-item">
+                        <div class="dropdown-header">闲聊(CHAT)</div>
+                        <div class="submenu" data-category="chat"></div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="mt-4 flex justify-between items-center gap-3">
+                <!-- 左侧：预览用户手册按钮 -->
+                <button id="previewBtn" class="flex-1 min-w-[100px] h-[42px] px-4 py-2.5 bg-blue-500 text-white text-sm font-medium rounded-lg shadow hover:bg-blue-600 transition-colors">
+                    预览用户手册
+                </button>
+
+                <!-- 中间：模型选择框（更宽） -->
+                <div class="relative flex-shrink-0 w-[140px]">
+                    <select id="modelSelect" class="w-full h-[42px] px-4 pr-10 bg-white border border-gray-300 rounded-lg text-sm text-gray-700 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition-all cursor-pointer appearance-none hover:border-gray-400">
+                        <option value="remote" selected>Qwen3.5-flash (remote)</option>
+                        <option value="local" id="localModelOption" disabled class="text-gray-400">Qwen3.5-2B-AWQ (local)-未连接</option>
+                    </select>
+                    <!-- 下拉箭头图标 -->
+                    <div class="absolute right-3 top-1/2 transform -translate-y-1/2 pointer-events-none text-gray-400">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7" />
+                        </svg>
+                    </div>
+                </div>
+
+                <!-- 右侧：开始对话按钮 -->
+                <button id="submitBtn" class="flex-1 min-w-[100px] h-[42px] px-4 py-2.5 bg-gray-900 text-white text-sm font-medium rounded-lg shadow hover:bg-gray-800 transition-colors">
+                    开始对话
+                </button>
+            </div>
+        </div>
+
+        <div class="flex-1 overflow-y-auto hide-scrollbar p-6 bg-gray-50/30">
+            <div class="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-4">参考信源 (Retrieved Context)</div>
+            <div id="contextContainer">
+                <div class="text-sm text-gray-400 italic">暂无检索内容...</div>
+            </div>
+        </div>
+    </div>
+
+    <div class="flex-1 overflow-y-auto relative bg-white">
+        <div class="max-w-4xl mx-auto px-12 py-16">
+            
+            <div class="mb-12">
+                <div class="text-xs font-semibold text-blue-600 uppercase tracking-wider mb-6" id="statusText">等待提问...</div>
+                <div id="answerContainer" class="markdown-body text-lg">
+                    </div>
+            </div>
+
+            <div id="citationsContainer" class="hidden mt-8 p-4 bg-blue-50/50 border border-blue-100 rounded text-sm text-blue-800">
+                <span class="font-semibold">来源文献 / 页码：</span>
+                <span id="citePagesText"></span>
+            </div>
+
+            <div id="imagesWrapper" class="hidden mt-12 border-t border-gray-100 pt-8">
+                <div class="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-6">关联图表 (Related Figures)</div>
+                <div id="imagesContainer" class="grid grid-cols-2 gap-6">
+                    </div>
+            </div>
+            
+        </div>
+    </div>
+
+    <script>
+        const queryInput = document.getElementById('queryInput');
+        const submitBtn = document.getElementById('submitBtn');
+        const contextContainer = document.getElementById('contextContainer');
+        const answerContainer = document.getElementById('answerContainer');
+        const statusText = document.getElementById('statusText');
+        const imagesWrapper = document.getElementById('imagesWrapper');
+        const imagesContainer = document.getElementById('imagesContainer');
+        const citationsContainer = document.getElementById('citationsContainer');
+        const citePagesText = document.getElementById('citePagesText');
+        const dropdownBtn = document.getElementById('dropdownBtn');
+        const dropdownMenu = document.getElementById('dropdownMenu');
+        const clearBtn = document.getElementById('clearBtn');
+        const modelSelect = document.getElementById('modelSelect');
+        const localModelOption = document.getElementById('localModelOption');
+
+        // 预置测试问题
+        const presetQuestions = {
+            default: [
+                "播放周杰伦的晴天",
+                "播放陈奕迅的十年",
+                "我现在播放的音乐是什么",
+                "请给我播放下一首歌",
+                "我现在的播放的音量多少",
+                "我希望减少音量",
+                "帮我把音量调到80",
+                "帮我导航到北京理工大学",
+                "我现在是要去哪里",
+                "帮我打开空调",
+                "我现在的空调是什么状态",
+                "帮我关闭后右边座位的空调",
+                "帮我把前排空调温度调到20度",
+                "帮我打开车窗",
+                "帮我打开副驾驶的车窗，全部打开",
+                "我车子的车窗现在是全部打开的吗？",
+                "帮我把所有的车窗关闭",
+                "帮我打开后备箱",
+                "我后备箱是开着的还是关着的",
+                "帮我打开方向盘加热到两档",
+                "方向盘加热温度太高了，帮我调低一点",
+                "帮我打开副驾驶的座椅加热，然后再帮我打开右后方的车门",
+                "现在座椅加热有几个人打开了",
+                "帮我切换到运动模式",
+                "帮我切换到经济模式，然后帮我把所有位置的空调都打开",
+                "帮我打开飞书app",
+                "我现在正在用什么app",
+                "帮我关闭飞书app",
+                "帮我把屏幕的灯光亮度调高一点",
+                "我想去天安门广场，顺便把空调关掉",
+                "我现在整车是什么状态"
+            ],
+            knowledge: [
+                "车辆识别码在哪里可以看到？",
+                "驾车途中调整座椅，可能出现哪些风险啊？",   
+                "18英寸轮胎的尺寸规格怎样的呀？",
+                "当轮胎压力指示灯闪烁一分钟时应该怎么办？",
+                "怎么让手机和蓝牙设备进行配对呀？",
+                "Tesla一共有几种钥匙,分别怎么用",
+                "若检测到外部充电设备发生故障，车辆能不能进行直流快速充电呢？",
+                "前撞预警可以监测到哪些东西呢？",
+                "智能泊车在什么状况下也许不能正常工作啊？",
+                "要是在前排座椅上放置安全带固定式儿童约束系统，座椅要升高到啥高度呢？",
+                "速度达到多少时行人警示系统会发出警示音？",
+                "你能不能简要地说下远光大灯咋控制，相关功能有啥？",
+                "行车记录仪图标会有哪些状态，这些状态都代表啥意思呢？",
+                "车辆的最大允许总质量包含哪些部分？",
+                "为什么Model 3长时间停着的时候要用充电器充电呢？",
+                "前摄像头外壳里有冷凝了，怎么清洁呢？",
+                "充电接口指示灯呈白色，会是哪几种情况？",
+                "车电量耗尽的时候，在车里边打开后备箱该如何操作呢？",
+                "紧急制动的情况下制动功能不正常了，怎样停车呢?",
+                "用哪些方式能够关上后备箱啊?",
+                "在超级充电站充电，什么情况下会被收取超时占用费呀？",
+                "电池图标变成黄色代表着什么呢？"
+
+            ],
+            chat: [
+                "前面又大塞车了，心情有点烦躁,有什么故事能让我心情好一点",
+                "今天开了一天的会，脑子很乱，随便陪我聊两句放松一下吧",
+                "周末我想开车去周边转转，如果是你的话，你会推荐去哪儿",
+                "夜里开车感觉好孤独啊",
+                "今天工作不顺心，想吐槽一下",
+                "你觉得你聪明还是我聪明？",
+                "我现在好饿啊，你觉得我今天去吃什么比较好。",
+                "天黑得真快，一天又过去了。",
+                "我总觉得我自己不够好。",
+                "可是别人都比我优秀，我永远比不过他们。",
+                "谢谢你，听你说完我觉得好多了。",
+                "给我推荐一部最近比较流行的电影吧。",
+                "这个我看过了哎，还有别的吗？",
+                "为什么给我推荐这部电影啊，它的看点在哪里？",
+                "好的，我晚上去看一下。",
+            ]
+        };
+        // 清空系统状态按钮
+        const resetStateBtn = document.getElementById('resetStateBtn');
+        resetStateBtn.addEventListener('click', async () => {
+            try {
+                const res = await fetch('/api/reset-state', { method: 'POST' });
+                const data = await res.json();
+                if (data.success) {
+                    alert('系统状态已重置成功！');
+                    answerContainer.innerHTML = '';
+                    contextContainer.innerHTML = '<div class="text-sm text-gray-400 italic">暂无检索内容...</div>';
+                    imagesWrapper.classList.add('hidden');
+                    citationsContainer.classList.add('hidden');
+                    statusText.textContent = '等待提问...';
+                } else {
+                    alert('重置失败：' + (data.error || '未知错误'));
+                }
+            } catch (err) {
+                alert('网络错误，重置失败');
+                console.error(err);
+            }
+        });
+
+
+        // 初始化下拉菜单问题列表
+        function initDropdownMenu() {
+            Object.keys(presetQuestions).forEach(category => {
+                const container = document.querySelector(`.submenu[data-category="${category}"]`);
+                if (container) {
+                    presetQuestions[category].forEach(question => {
+                        const item = document.createElement('div');
+                        item.className = 'submenu-item';
+                        item.textContent = question;
+                        item.addEventListener('click', () => {
+                            queryInput.value = question;
+                            dropdownMenu.classList.add('hidden');
+                            // 关闭所有展开的子菜单
+                            document.querySelectorAll('.menu-item.expanded').forEach(el => {
+                                el.classList.remove('expanded');
+                            });
+                            // 自动聚焦
+                            queryInput.focus();
+                        });
+                        container.appendChild(item);
+                    });
+                }
+            });
+            
+            // 添加点击父级菜单展开/收起子菜单的功能
+            document.querySelectorAll('.menu-item .dropdown-header').forEach(header => {
+                header.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    const menuItem = header.parentElement;
+                    const isExpanded = menuItem.classList.contains('expanded');
+                    
+                    // 先关闭其他所有展开的菜单（手风琴效果，可选）
+                    document.querySelectorAll('.menu-item.expanded').forEach(el => {
+                        if (el !== menuItem) {
+                            el.classList.remove('expanded');
+                        }
+                    });
+                    
+                    // 切换当前菜单状态
+                    menuItem.classList.toggle('expanded', !isExpanded);
+                });
+            });
+        }
+
+        // 下拉菜单切换
+        dropdownBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            dropdownMenu.classList.toggle('hidden');
+        });
+
+        // 点击其他地方关闭下拉菜单
+        document.addEventListener('click', (e) => {
+            if (!dropdownBtn.contains(e.target) && !dropdownMenu.contains(e.target)) {
+                dropdownMenu.classList.add('hidden');
+            }
+        });
+
+        // 初始化
+        initDropdownMenu();
+        
+        // 检查模型状态
+        async function checkModelStatus() {
+            try {
+                const response = await fetch('/api/model-status');
+                if (response.ok) {
+                    const status = await response.json();
+                    console.log('模型状态:', status);
+                    
+                    if (status.local_available) {
+                        // 本地模型可用
+                        localModelOption.disabled = false;
+                        localModelOption.textContent = `${status.local_model_name} - 已连接`;
+                        localModelOption.classList.remove('text-gray-400');
+                        localModelOption.classList.add('text-gray-700');
+                    } else {
+                        // 本地模型不可用
+                        localModelOption.disabled = true;
+                        localModelOption.textContent = `${status.local_model_name} - 未连接`;
+                        localModelOption.classList.add('text-gray-400');
+                        localModelOption.classList.remove('text-gray-700');
+                        
+                        // 如果当前选中了本地模型，切换到远程
+                        if (modelSelect.value === 'local') {
+                            modelSelect.value = 'remote';
+                        }
+                    }
+                }
+            } catch (error) {
+                console.error('获取模型状态失败:', error);
+            }
+        }
+        
+        // 页面加载时检查模型状态
+        checkModelStatus();
+        
+        // 每30秒刷新一次模型状态
+        setInterval(checkModelStatus, 30000);
+        
+        // 清空按钮功能 - 一直显示，点击清空
+        clearBtn.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            queryInput.value = '';
+            queryInput.focus();
+        });
+        // 预览用户手册按钮点击事件
+        const previewBtn = document.getElementById('previewBtn');
+        previewBtn.addEventListener('click', () => {
+            window.open('/manual', '_blank');
+        });
+
+
+        // 回车发送快捷键 (Shift+Enter 换行)
+        queryInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                submitBtn.click();
+            }
+        });
+
+        submitBtn.addEventListener('click', async () => {
+            const query = queryInput.value.trim();
+            if (!query) return;
+            
+            // 获取选中的模型
+            const selectedModel = modelSelect.value;
+
+            // UI 初始化准备
+            submitBtn.disabled = true;
+            submitBtn.textContent = "检索中...";
+            submitBtn.classList.add('opacity-50', 'cursor-not-allowed');
+            modelSelect.disabled = true;
+            modelSelect.classList.add('opacity-50', 'cursor-not-allowed');
+            statusText.textContent = "正在进行语义检索与分析...";
+            statusText.classList.replace('text-red-500', 'text-blue-600');
+            statusText.classList.replace('text-gray-400', 'text-blue-600');
+            
+            contextContainer.innerHTML = '';
+            answerContainer.innerHTML = '';
+            imagesContainer.innerHTML = '';
+            imagesWrapper.classList.add('hidden');
+            citationsContainer.classList.add('hidden');
+            
+            let currentAnswerText = "";
+
+            try {
+                // 发起流式请求
+                const response = await fetch('/api/chat', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ query, model: selectedModel })
+                });
+
+                if (!response.ok) {
+                    throw new Error(`HTTP 请求错误: ${response.status}`);
+                }
+
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder('utf-8');
+                let buffer = ''; // 引入缓冲区机制，防止 JSON 截断
+
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+
+                    // 解码新到达的数据块并拼接到 buffer
+                    buffer += decoder.decode(value, { stream: true });
+                    
+                    // 按换行符分割
+                    const lines = buffer.split('\n');
+                    
+                    // 弹出最后一段（因为最后一段可能是不完整的 JSON，留到下一次拼接）
+                    buffer = lines.pop();
+
+                    for (const line of lines) {
+                        if (!line.trim()) continue;
+
+                        try {
+                            const payload = JSON.parse(line);
+
+                            // 1. 处理左侧：检索片段
+                            if (payload.type === 'context') {
+                                contextContainer.innerHTML = '';
+                                payload.data.forEach((text, index) => {
+                                    const div = document.createElement('div');
+                                    div.className = 'context-item';
+                                    div.textContent = `[片段 ${index + 1}] ${text}`;
+                                    contextContainer.appendChild(div);
+                                });
+                                statusText.textContent = "AI 正在生成深度解答...";
+                            }
+                            
+                            // 2. 处理右侧：文字流式输出
+                            else if (payload.type === 'token') {
+                                currentAnswerText += payload.data;
+                                // 实时渲染 markdown
+                                answerContainer.innerHTML = marked.parse(currentAnswerText);
+                                // 滚动条跟随
+                                window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
+                            }
+
+                            // 3. 处理右侧底部：图片与引用
+                            else if (payload.type === 'final') {
+                                statusText.textContent = "解答完成";
+                                statusText.classList.replace('text-blue-600', 'text-gray-400');
+
+                                const finalData = payload.data;
+                                
+                                // 渲染引用页码
+                                if (finalData.cite_pages && finalData.cite_pages.length > 0) {
+                                    citationsContainer.classList.remove('hidden');
+                                    citePagesText.textContent = finalData.cite_pages;
+                                }
+
+                                // 渲染关联图片
+                                if (finalData.related_images && finalData.related_images.length > 0) {
+                                    imagesWrapper.classList.remove('hidden');
+                                    finalData.related_images.forEach(img => {
+                                        const encodedPath = encodeURIComponent(img.image_path);
+                                        const imageHtml = `
+                                            <div class="image-card shadow-sm">
+                                                <img src="/api/image?path=${encodedPath}" alt="${img.title}" loading="lazy"/>
+                                                <div class="image-caption">${img.title}</div>
+                                            </div>
+                                        `;
+                                        imagesContainer.insertAdjacentHTML('beforeend', imageHtml);
+                                    });
+                                }
+                            }
+                            
+                            // 4. 处理后端抛出的错误
+                            else if (payload.type === 'error') {
+                                statusText.textContent = "服务提示";
+                                statusText.classList.replace('text-blue-600', 'text-red-500');
+                                answerContainer.innerHTML += `<br><span class="text-red-500">${payload.data}</span>`;
+                            }
+                        } catch (e) {
+                            console.error("数据解析忽略:", line, e);
+                        }
+                    }
+                }
+            } catch (error) {
+                console.error(error);
+                statusText.textContent = "网络异常";
+                statusText.classList.replace('text-blue-600', 'text-red-500');
+                answerContainer.innerHTML = `<span class="text-red-500">无法连接到核心服务器，请检查网络或终端报错信息。</span>`;
+            } finally {
+                // 恢复按钮状态
+                submitBtn.disabled = false;
+                submitBtn.textContent = "开始对话";
+                submitBtn.classList.remove('opacity-50', 'cursor-not-allowed');
+                modelSelect.disabled = false;
+                modelSelect.classList.remove('opacity-50', 'cursor-not-allowed');
+            }
+        });
+    </script>
+</body>
+</html>
