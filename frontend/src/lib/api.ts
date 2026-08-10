@@ -10,7 +10,12 @@ export async function fetchCabinState(sessionId = "default") {
     state: CabinStateSnapshot;
     pending: ConfirmPayload | null;
     slots: Record<string, unknown>;
-    agent?: Record<string, unknown>;
+    agent?: {
+      transcript_chars?: number;
+      transcript_messages?: number;
+      memory_preview?: string;
+      session_dir?: string;
+    };
   }>;
 }
 
@@ -25,8 +30,87 @@ export async function resetCabin(sessionId = "default") {
 export async function fetchApps() {
   const res = await fetch("/api/apps");
   if (!res.ok) throw new Error(`apps ${res.status}`);
-  return res.json() as Promise<{ count: number; apps: { name: string; category: string }[] }>;
+  return res.json() as Promise<{
+    count: number;
+    apps: { name: string; category: string; aliases?: string[] }[];
+    categories: string[];
+    note?: string;
+  }>;
 }
+
+export async function fetchTools() {
+  const res = await fetch("/api/tools");
+  if (!res.ok) throw new Error(`tools ${res.status}`);
+  return res.json() as Promise<{
+    tools: {
+      name: string;
+      description: string;
+      risk: string;
+      domain: string;
+      schema?: Record<string, unknown>;
+    }[];
+  }>;
+}
+
+export async function fetchModelStatus() {
+  const res = await fetch("/api/model-status");
+  if (!res.ok) throw new Error(`model-status ${res.status}`);
+  return res.json() as Promise<Record<string, unknown>>;
+}
+
+export async function fetchAgentHistory(sessionId = "default", limit = 40) {
+  const res = await fetch(
+    `/api/agent/history?session_id=${encodeURIComponent(sessionId)}&limit=${limit}`,
+  );
+  if (!res.ok) throw new Error(`history ${res.status}`);
+  return res.json() as Promise<{
+    session_id: string;
+    total_returned: number;
+    turns: AgentTurnSummary[];
+  }>;
+}
+
+export async function fetchAgentTurn(turnId: string, sessionId = "default") {
+  const res = await fetch(
+    `/api/agent/turns/${encodeURIComponent(turnId)}?session_id=${encodeURIComponent(sessionId)}`,
+  );
+  if (!res.ok) throw new Error(`turn ${res.status}`);
+  return res.json() as Promise<Record<string, unknown>>;
+}
+
+export async function fetchAgentContext(sessionId = "default") {
+  const res = await fetch(`/api/agent/context?session_id=${encodeURIComponent(sessionId)}`);
+  if (!res.ok) throw new Error(`context ${res.status}`);
+  return res.json() as Promise<{
+    session_id: string;
+    sources: string[];
+    total_chars: number;
+    recent_dialog: string;
+    user_context_preview: string;
+  }>;
+}
+
+export async function compactAgent(sessionId = "default", model = "remote") {
+  const res = await fetch(
+    `/api/agent/compact?session_id=${encodeURIComponent(sessionId)}&model=${encodeURIComponent(model)}`,
+    { method: "POST" },
+  );
+  if (!res.ok) throw new Error(`compact ${res.status}`);
+  return res.json();
+}
+
+export type AgentTurnSummary = {
+  turn_id?: string;
+  id?: string;
+  started_at?: number;
+  ended_at?: number;
+  query?: string;
+  user_query?: string;
+  answer_preview?: string;
+  status?: string;
+  steps?: TraceStep[];
+  step_count?: number;
+};
 
 export type StreamHandlers = {
   onToken?: (text: string) => void;

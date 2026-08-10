@@ -1,41 +1,41 @@
-# 面试 Demo 剧本（约 3 分钟）
+# 面试 Demo 剧本（约 3–4 分钟）
 
-入口：`python run.py` → http://127.0.0.1:6006
+入口：`python run.py` → http://127.0.0.1:6006  
+（需先 `cd frontend && npm run build`）
 
-## 开场（15s）
+## 开场（20s）
 
-「这不是 ChatGPT 套壳，是座舱 Agent：Gateway 车控、Policy 确认、Transcript 可观测。」
+「这不是 ChatGPT 套壳，是座舱 Agent Runtime：Gateway 车控、Policy 确认、Transcript 可观测、React HMI。」
 
-展示：右侧 LIVE STATE、中间声纹球、顶部 CABIN。
+展示：左侧导航 Drive/Apps/Agent、顶栏状态条、中间声纹球、右侧 LIVE STATE。
 
 ## 片段 1 · 多工具（40s）
 
-语音或输入：`打开空调并播放周杰伦的晴天`
+点芯片或语音：`打开空调并播放周杰伦的晴天`
 
-看点：
-- 对话里出现 intent / tool 轨迹条
-- 右侧 Climate / Media 数值变化
+看点：对话内 TurnRail；Climate / Media HUD 变化。
 
 ## 片段 2 · 状态 + 指代（40s）
 
-`现在音量多少` → 再 `小一点`
+`现在音量多少` → `小一点`
 
-看点：SEARCH 读 state，再 TOOL 改 volume，HUD 同步。
+看点：读 state 再改 volume，状态条/HUD 同步。
 
 ## 片段 3 · 安全门控（40s）
 
-`打开后备箱`
+`打开后备箱` → 确认卡 → 确认执行。
 
-看点：确认卡片出现 → 点确认 → 执行。讲「高风险不靠模型嘴炮」。
+金句：「高风险不靠模型嘴炮，靠 Policy。」
 
-## 片段 4 · 知识 RAG（40s）
+## 片段 4 · Apps + RAG（50s）
 
-`自动泊车怎么用`
+切到 **Apps** 打开飞书 → 回 Drive 问 `自动泊车怎么用`。
 
-看点：Retrieved 片段 + 引用页码（若有图更好）。
+看点：前台 App 同步；Retrieved + 引用页码。
 
-## 收尾（20s）
+## 收尾（30s）
 
-点「轨迹」打开 Agent Console，展示 turns.jsonl 时间线。
+切到 **Agent** 页：Turn 列表、JSON、Compact。  
+Setup 页展示工具注册表。
 
-金句：「Stub Gateway 可替换真车机；前端是独立 React 工程，不是单页 HTML 堆砌。」
+金句：「Stub Gateway 可换真车机；前端是独立工程，多路由座舱壳，不是单页 HTML。」

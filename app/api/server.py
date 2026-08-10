@@ -180,12 +180,23 @@ async def agent_transcript(
     }
 
 
-@app.get("/agent", response_class=HTMLResponse)
-async def agent_console(request: Request):
+@app.get("/agent-console", response_class=HTMLResponse)
+async def agent_console_legacy(request: Request):
+    """旧版 HTML Agent Console；React HMI 使用 /agent。"""
     path = config.WEBUI_DIR / "agent.html"
     if path.exists():
         return HTMLResponse(path.read_text(encoding="utf-8"))
     return HTMLResponse("<h1>agent.html missing</h1>", status_code=404)
+
+
+@app.get("/apps", response_class=HTMLResponse)
+@app.get("/agent", response_class=HTMLResponse)
+@app.get("/settings", response_class=HTMLResponse)
+async def cabin_spa_routes():
+    """React Router 深链接：回落至 HMI index.html。"""
+    if HAS_CABIN_HMI and config.PREFER_CABIN_HMI:
+        return FileResponse(CABIN_DIST / "index.html")
+    return HTMLResponse("<h1>Cabin HMI not built. Run: cd frontend && npm run build</h1>", status_code=404)
 
 
 @app.post("/api/reset")

@@ -1,34 +1,42 @@
 # Cabin HMI（React）
 
-智能座舱演示前端：Vite + React + TypeScript + Zustand + Framer Motion。
+独立前端工程：Vite + React 19 + TypeScript + Zustand + Framer Motion + React Router。
+
+## 页面
+
+| 路由 | 说明 |
+|------|------|
+| `/` | Drive：声纹球、对话、演示指令、LIVE STATE HUD |
+| `/apps` | 车机应用目录，点击走 `apps.launch` |
+| `/agent` | Turn 时间线、详情 JSON、Memory preview、Compact |
+| `/settings` | 模型/TTS、工具注册表 |
+| `/legacy` | 旧 HTML UI |
+| `/agent-console` | 旧 Agent HTML Console |
+
+## 设计语言
+
+- 石墨底 + 香槟金点缀，无紫渐变、无霓虹 AI 风
+- Instrument Serif + DM Sans
+- 状态条 / 侧栏 / 确认门控 三层信息架构
 
 ## 开发
 
 ```bash
-# 终端 1：后端
-conda activate tesla
-python run.py
+# 终端 1
+conda activate tesla && python run.py
 
-# 终端 2：前端
+# 终端 2
 cd frontend
 npm install
-npm run dev
-# http://127.0.0.1:5173 （API 代理到 6006）
+npm run dev   # http://127.0.0.1:5173 → 代理到 6006
 ```
 
-## 生产托管（由 FastAPI 提供）
+## 生产构建（由 FastAPI 托管）
 
 ```bash
 cd frontend && npm run build
-conda activate tesla && python run.py
-# http://127.0.0.1:6006 → 座舱 HMI
-# http://127.0.0.1:6006/legacy → 旧 webui
+python run.py
+# http://127.0.0.1:6006
 ```
 
-## 演示亮点
-
-- 按住声纹球：浏览器语音识别 → Agent → TTS 播报
-- 右侧 LIVE STATE 与控车结果同步
-- 对话内嵌本轮 Agent 轨迹 steps
-- 高风险操作确认卡片
-- 无紫渐变模板风：石墨底 + 单点香槟金点缀
+`PREFER_CABIN_HMI=0` 可强制回退旧 webui。
