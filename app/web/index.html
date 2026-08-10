@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Tesla Cabin Runtime</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg0: #0f1419;
+      --bg1: #171d25;
+      --bg2: #1e2630;
+      --line: #2a3441;
+      --text: #e8eef6;
+      --muted: #8b9bb0;
+      --accent: #e82127;
+      --accent2: #3dd6c6;
+      --ok: #3ecf8e;
+      --warn: #f0b429;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: "Outfit", sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(1200px 600px at 10% -10%, rgba(232,33,39,.18), transparent 50%),
+        radial-gradient(900px 500px at 100% 0%, rgba(61,214,198,.10), transparent 45%),
+        linear-gradient(180deg, #0c1015, #121820 40%, #0f1419);
+    }
+    .shell {
+      max-width: 1280px;
+      margin: 0 auto;
+      padding: 20px;
+      display: grid;
+      grid-template-columns: 300px 1fr;
+      gap: 16px;
+      min-height: calc(100vh - 40px);
+    }
+    @media (max-width: 960px) {
+      .shell { grid-template-columns: 1fr; }
+    }
+    .panel {
+      background: linear-gradient(180deg, rgba(30,38,48,.95), rgba(23,29,37,.92));
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      overflow: hidden;
+    }
+    .side { padding: 18px; display: flex; flex-direction: column; gap: 14px; }
+    .brand {
+      font-size: 1.35rem;
+      font-weight: 700;
+      letter-spacing: .02em;
+    }
+    .brand span { color: var(--accent); }
+    .sub { color: var(--muted); font-size: .85rem; }
+    .stat-grid { display: grid; gap: 10px; }
+    .stat {
+      background: var(--bg0);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 12px;
+    }
+    .stat .k { color: var(--muted); font-size: .75rem; text-transform: uppercase; letter-spacing: .06em; }
+    .stat .v { margin-top: 4px; font-size: 1.05rem; font-weight: 600; font-family: "JetBrains Mono", monospace; }
+    .main { display: flex; flex-direction: column; min-height: 80vh; }
+    .topbar {
+      display: flex; gap: 10px; align-items: center; justify-content: space-between;
+      padding: 14px 16px; border-bottom: 1px solid var(--line);
+    }
+    select, button, input, textarea {
+      font-family: inherit;
+    }
+    select, .btn, .ghost {
+      background: var(--bg0);
+      color: var(--text);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 8px 12px;
+      font-size: .9rem;
+    }
+    .btn {
+      background: var(--accent);
+      border-color: transparent;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .btn.secondary { background: var(--accent2); color: #062421; }
+    .btn:disabled { opacity: .5; cursor: not-allowed; }
+    .ghost { cursor: pointer; background: transparent; }
+    .chat {
+      flex: 1;
+      overflow-y: auto;
+      padding: 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+    .msg {
+      max-width: 85%;
+      padding: 12px 14px;
+      border-radius: 14px;
+      line-height: 1.55;
+      white-space: pre-wrap;
+    }
+    .msg.user {
+      align-self: flex-end;
+      background: rgba(232,33,39,.16);
+      border: 1px solid rgba(232,33,39,.35);
+    }
+    .msg.bot {
+      align-self: flex-start;
+      background: var(--bg0);
+      border: 1px solid var(--line);
+    }
+    .meta {
+      font-size: .75rem;
+      color: var(--muted);
+      margin-bottom: 6px;
+      font-family: "JetBrains Mono", monospace;
+    }
+    .confirm-box {
+      border: 1px solid rgba(240,180,41,.5);
+      background: rgba(240,180,41,.08);
+      border-radius: 12px;
+      padding: 12px;
+      margin-top: 8px;
+    }
+    .confirm-box .actions { display: flex; gap: 8px; margin-top: 10px; }
+    .composer {
+      border-top: 1px solid var(--line);
+      padding: 14px;
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 10px;
+    }
+    textarea {
+      width: 100%;
+      min-height: 72px;
+      resize: vertical;
+      background: var(--bg0);
+      color: var(--text);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 12px;
+      outline: none;
+    }
+    textarea:focus { border-color: rgba(61,214,198,.5); }
+    .chips { display: flex; flex-wrap: wrap; gap: 8px; padding: 0 14px 10px; }
+    .chip {
+      font-size: .78rem;
+      padding: 6px 10px;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      color: var(--muted);
+      cursor: pointer;
+      background: transparent;
+    }
+    .chip:hover { color: var(--text); border-color: var(--accent2); }
+    .ctx {
+      margin-top: 8px;
+      font-size: .8rem;
+      color: var(--muted);
+      max-height: 120px;
+      overflow: auto;
+      border-left: 2px solid var(--line);
+      padding-left: 8px;
+    }
+    .images { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 8px; margin-top: 10px; }
+    .images img { width: 100%; border-radius: 8px; border: 1px solid var(--line); }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <aside class="panel side">
+      <div>
+        <div class="brand">Cabin <span>Runtime</span></div>
+        <div class="sub">V2 · 快路径控车 · 确认门控 · 会话隔离</div>
+      </div>
+      <div class="stat-grid" id="statePanel">
+        <div class="stat"><div class="k">Climate</div><div class="v" id="sClimate">--</div></div>
+        <div class="stat"><div class="k">Media</div><div class="v" id="sMedia">--</div></div>
+        <div class="stat"><div class="k">Nav</div><div class="v" id="sNav">--</div></div>
+        <div class="stat"><div class="k">Dynamics</div><div class="v" id="sDyn">P / 0km/h</div></div>
+      </div>
+      <div class="sub">Session</div>
+      <input id="sessionId" value="default" style="width:100%;padding:10px;border-radius:10px;border:1px solid var(--line);background:var(--bg0);color:var(--text)" />
+      <button class="ghost" id="refreshState">刷新车况</button>
+      <button class="ghost" id="resetBtn">重置本会话</button>
+      <div class="sub" id="modelHint">模型检测中...</div>
+    </aside>
+
+    <section class="panel main">
+      <div class="topbar">
+        <div class="sub">智能座舱助手</div>
+        <div style="display:flex;gap:8px;align-items:center">
+          <select id="modelSelect">
+            <option value="remote">Remote · 百炼</option>
+            <option value="local">Local · vLLM</option>
+          </select>
+          <a class="ghost" href="/manual" target="_blank">手册</a>
+        </div>
+      </div>
+      <div class="chat" id="chat"></div>
+      <div class="chips">
+        <button class="chip" data-q="打开空调">打开空调</button>
+        <button class="chip" data-q="温度降2度">温度降2度</button>
+        <button class="chip" data-q="播放周杰伦的晴天">播放晴天</button>
+        <button class="chip" data-q="打开空调并播放晴天">空调+音乐</button>
+        <button class="chip" data-q="解锁右后门">解锁右后门</button>
+        <button class="chip" data-q="现在空调多少度">查温度</button>
+        <button class="chip" data-q="自动泊车怎么用">手册问答</button>
+      </div>
+      <div class="composer">
+        <textarea id="input" placeholder="说点什么… 例如：打开后排空调 / 车窗再开大一点"></textarea>
+        <button class="btn" id="sendBtn">发送</button>
+      </div>
+    </section>
+  </div>
+
+  <script>
+    const chat = document.getElementById('chat');
+    const input = document.getElementById('input');
+    const sendBtn = document.getElementById('sendBtn');
+    let busy = false;
+
+    function sid() { return document.getElementById('sessionId').value.trim() || 'default'; }
+
+    function addMsg(role, text) {
+      const el = document.createElement('div');
+      el.className = 'msg ' + (role === 'user' ? 'user' : 'bot');
+      el.innerHTML = `<div class="meta">${role === 'user' ? 'YOU' : 'CABIN'}</div><div class="body"></div>`;
+      el.querySelector('.body').textContent = text || '';
+      chat.appendChild(el);
+      chat.scrollTop = chat.scrollHeight;
+      return el;
+    }
+
+    function renderState(summary) {
+      if (!summary) return;
+      const climate = summary.climate_power ? `ON ${summary.temp ?? '--'}°C / fan ${summary.fan ?? '-'}` : 'OFF';
+      document.getElementById('sClimate').textContent = climate;
+      const m = summary.music || {};
+      document.getElementById('sMedia').textContent = m.playing ? `${m.artist||''} - ${m.title||''} · vol ${summary.volume}` : `idle · vol ${summary.volume ?? '--'}`;
+      const n = summary.navigation || {};
+      document.getElementById('sNav').textContent = n.navigating ? `→ ${n.destination}` : 'idle';
+      document.getElementById('sDyn').textContent = `${summary.gear || 'P'} / ${summary.speed_kmh ?? 0} km/h`;
+    }
+
+    async function refreshState() {
+      const r = await fetch('/api/state?session_id=' + encodeURIComponent(sid()));
+      const data = await r.json();
+      const st = data.state || {};
+      const fl = (((st.climate||{}).zones)||{}).front_left || {};
+      renderState({
+        climate_power: (st.climate||{}).power,
+        temp: fl.temp,
+        fan: fl.fan,
+        volume: (st.media||{}).volume,
+        music: (st.media||{}).music,
+        navigation: st.navigation,
+        gear: (st.dynamics||{}).gear,
+        speed_kmh: (st.dynamics||{}).speed_kmh,
+      });
+    }
+
+    async function send(text, confirm=null) {
+      if (busy) return;
+      const q = (text ?? input.value).trim();
+      if (!q && confirm === null) return;
+      busy = true; sendBtn.disabled = true;
+      if (confirm === null) {
+        addMsg('user', q);
+        input.value = '';
+      }
+      const bot = addMsg('bot', '');
+      const bodyEl = bot.querySelector('.body');
+      let acc = '';
+
+      try {
+        const resp = await fetch('/api/chat', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            query: q || (confirm ? '确认' : '取消'),
+            session_id: sid(),
+            model: document.getElementById('modelSelect').value,
+            confirm: confirm
+          })
+        });
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        let buf = '';
+        while (true) {
+          const {value, done} = await reader.read();
+          if (done) break;
+          buf += decoder.decode(value, {stream: true});
+          const lines = buf.split('\n');
+          buf = lines.pop();
+          for (const line of lines) {
+            if (!line.trim()) continue;
+            let ev; try { ev = JSON.parse(line); } catch { continue; }
+            if (ev.type === 'token') {
+              acc += ev.data;
+              bodyEl.textContent = acc;
+              chat.scrollTop = chat.scrollHeight;
+            } else if (ev.type === 'intent') {
+              const meta = bot.querySelector('.meta');
+              meta.textContent = `CABIN · ${ev.data.type} · ${ev.data.fast_path ? 'fast' : 'llm'} · ${Math.round((ev.data.confidence||0)*100)}%`;
+            } else if (ev.type === 'confirm') {
+              const box = document.createElement('div');
+              box.className = 'confirm-box';
+              box.innerHTML = `<div>${ev.data.message}</div><div class="sub" style="margin-top:6px">${ev.data.summary||''}</div>
+                <div class="actions">
+                  <button class="btn secondary" data-c="1">确认执行</button>
+                  <button class="ghost" data-c="0">取消</button>
+                </div>`;
+              bodyEl.appendChild(box);
+              box.querySelector('[data-c="1"]').onclick = () => send('确认', true);
+              box.querySelector('[data-c="0"]').onclick = () => send('取消', false);
+            } else if (ev.type === 'context') {
+              const ctx = document.createElement('div');
+              ctx.className = 'ctx';
+              ctx.textContent = (ev.data || []).slice(0,2).join('\n---\n');
+              bodyEl.appendChild(ctx);
+            } else if (ev.type === 'final') {
+              if (ev.data && ev.data.state) renderState(ev.data.state);
+              if (ev.data && ev.data.related_images && ev.data.related_images.length) {
+                const grid = document.createElement('div');
+                grid.className = 'images';
+                for (const img of ev.data.related_images.slice(0,4)) {
+                  const im = document.createElement('img');
+                  im.src = '/api/image?path=' + encodeURIComponent(img.image_path || img.path || '');
+                  im.alt = img.title || '';
+                  grid.appendChild(im);
+                }
+                bodyEl.appendChild(grid);
+              }
+              if (ev.data && ev.data.cite_pages && ev.data.cite_pages.length) {
+                const p = document.createElement('div');
+                p.className = 'sub';
+                p.style.marginTop = '8px';
+                p.textContent = '引用页: ' + ev.data.cite_pages.join(', ');
+                bodyEl.appendChild(p);
+              }
+            } else if (ev.type === 'error') {
+              acc += '\n[错误] ' + ev.data;
+              bodyEl.textContent = acc;
+            }
+          }
+        }
+      } catch (e) {
+        bodyEl.textContent = '请求失败: ' + e;
+      } finally {
+        busy = false; sendBtn.disabled = false;
+        refreshState();
+      }
+    }
+
+    sendBtn.onclick = () => send();
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+    });
+    document.querySelectorAll('.chip').forEach(c => c.onclick = () => send(c.dataset.q));
+    document.getElementById('refreshState').onclick = refreshState;
+    document.getElementById('resetBtn').onclick = async () => {
+      await fetch('/api/reset?session_id=' + encodeURIComponent(sid()), {method:'POST'});
+      addMsg('bot', '本会话状态已重置。');
+      refreshState();
+    };
+
+    (async () => {
+      try {
+        const r = await fetch('/api/model-status');
+        const s = await r.json();
+        document.getElementById('modelHint').textContent =
+          `Remote: ${s.remote_available ? 'OK' : 'NO'} · Local: ${s.local_available ? 'OK' : 'NO'}`;
+      } catch {
+        document.getElementById('modelHint').textContent = '模型状态不可用';
+      }
+      refreshState();
+    })();
+  </script>
+</body>
+</html>

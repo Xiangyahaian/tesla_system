@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Agent Console · 轨迹与历史</title>
+  <style>
+    :root {
+      --bg: #f4f5f7;
+      --panel: #ffffff;
+      --line: #e5e7eb;
+      --text: #111827;
+      --muted: #6b7280;
+      --accent: #1d4ed8;
+      --ok: #047857;
+      --warn: #b45309;
+      --err: #b91c1c;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "IBM Plex Sans", "Noto Sans SC", system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 14px 20px;
+      background: var(--panel);
+      border-bottom: 1px solid var(--line);
+    }
+    header h1 {
+      margin: 0;
+      font-size: 16px;
+      font-weight: 650;
+      letter-spacing: 0.02em;
+    }
+    header .meta { color: var(--muted); font-size: 12px; }
+    header a {
+      color: var(--accent);
+      text-decoration: none;
+      font-size: 13px;
+      margin-left: 12px;
+    }
+    .toolbar {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    input, select, button {
+      font: inherit;
+      font-size: 13px;
+      border: 1px solid var(--line);
+      background: #fff;
+      border-radius: 6px;
+      padding: 7px 10px;
+      color: var(--text);
+    }
+    button {
+      cursor: pointer;
+      background: #111827;
+      color: #fff;
+      border-color: #111827;
+    }
+    button.ghost {
+      background: #fff;
+      color: var(--text);
+      border-color: var(--line);
+    }
+    main {
+      flex: 1;
+      min-height: 0;
+      display: grid;
+      grid-template-columns: 340px 1fr;
+    }
+    aside, section {
+      min-height: 0;
+      overflow: auto;
+      background: var(--panel);
+    }
+    aside { border-right: 1px solid var(--line); }
+    .panel-title {
+      position: sticky;
+      top: 0;
+      z-index: 1;
+      background: var(--panel);
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--line);
+      font-size: 12px;
+      font-weight: 650;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+    .turn {
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--line);
+      cursor: pointer;
+    }
+    .turn:hover, .turn.active { background: #f8fafc; }
+    .turn .q {
+      font-size: 14px;
+      font-weight: 550;
+      margin: 0 0 6px;
+      line-height: 1.4;
+    }
+    .turn .row {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      padding: 1px 7px;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      background: #fff;
+      font-size: 11px;
+    }
+    .badge.ok { color: var(--ok); border-color: #a7f3d0; background: #ecfdf5; }
+    .badge.warn { color: var(--warn); border-color: #fde68a; background: #fffbeb; }
+    .badge.error, .badge.blocked { color: var(--err); border-color: #fecaca; background: #fef2f2; }
+    .detail { padding: 16px 20px 40px; }
+    .empty {
+      padding: 40px 20px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+    .kv {
+      display: grid;
+      grid-template-columns: 120px 1fr;
+      gap: 8px 12px;
+      font-size: 13px;
+      margin-bottom: 18px;
+    }
+    .kv dt { color: var(--muted); }
+    .kv dd { margin: 0; word-break: break-word; }
+    .timeline { list-style: none; margin: 0; padding: 0; }
+    .timeline li {
+      position: relative;
+      padding: 0 0 18px 22px;
+      border-left: 2px solid var(--line);
+      margin-left: 8px;
+    }
+    .timeline li::before {
+      content: "";
+      position: absolute;
+      left: -5px;
+      top: 4px;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--accent);
+    }
+    .timeline li.warn::before { background: var(--warn); }
+    .timeline li.error::before { background: var(--err); }
+    .step-title { font-size: 14px; font-weight: 600; }
+    .step-meta { font-size: 12px; color: var(--muted); margin-top: 2px; }
+    pre {
+      margin: 8px 0 0;
+      padding: 10px 12px;
+      background: #0b1220;
+      color: #e5e7eb;
+      border-radius: 8px;
+      font-size: 12px;
+      overflow: auto;
+      max-height: 260px;
+      font-family: "IBM Plex Mono", ui-monospace, monospace;
+    }
+    .tabs { display: flex; gap: 8px; margin: 0 0 14px; }
+    .tabs button.active { background: var(--accent); border-color: var(--accent); }
+    .split {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+    @media (max-width: 960px) {
+      main { grid-template-columns: 1fr; }
+      .split { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>Agent Console</h1>
+      <div class="meta">规范化轨迹 · turns.jsonl · transcript</div>
+    </div>
+    <div class="toolbar">
+      <label class="meta">session</label>
+      <input id="sessionId" value="default" style="width:120px" />
+      <button class="ghost" id="refreshBtn">刷新</button>
+      <button class="ghost" id="compactBtn">强制压缩</button>
+      <a href="/">返回对话</a>
+    </div>
+  </header>
+  <main>
+    <aside>
+      <div class="panel-title">历史轮次</div>
+      <div id="turnList"></div>
+    </aside>
+    <section>
+      <div class="panel-title">轨迹详情</div>
+      <div class="detail" id="detail">
+        <div class="empty">选择左侧某一轮，查看完整 Agent 轨迹。</div>
+      </div>
+    </section>
+  </main>
+  <script>
+    const $ = (id) => document.getElementById(id);
+    let currentTurnId = null;
+    let viewMode = 'trace';
+
+    function sid() { return ($('sessionId').value || 'default').trim(); }
+    function fmtTime(ts) {
+      if (!ts) return '-';
+      const d = new Date(ts * 1000);
+      return d.toLocaleString();
+    }
+    function statusClass(s) {
+      if (!s) return '';
+      if (['ok', 'cancelled'].includes(s)) return 'ok';
+      if (['need_confirm', 'warn'].includes(s)) return 'warn';
+      return 'error';
+    }
+
+    async function loadTurns() {
+      const res = await fetch(`/api/agent/history?session_id=${encodeURIComponent(sid())}&limit=80`);
+      const data = await res.json();
+      const list = $('turnList');
+      if (!data.turns || !data.turns.length) {
+        list.innerHTML = '<div class="empty">暂无历史。先在对话页提问。</div>';
+        return;
+      }
+      list.innerHTML = data.turns.map(t => `
+        <div class="turn ${t.turn_id === currentTurnId ? 'active' : ''}" data-id="${t.turn_id}">
+          <p class="q">${escapeHtml(t.query || '(空)')}</p>
+          <div class="row">
+            <span class="badge ${statusClass(t.status)}">${t.status}</span>
+            <span class="badge">${t.intent || '-'}</span>
+            <span>${t.duration_ms || 0} ms</span>
+            <span>${t.step_count || 0} steps</span>
+          </div>
+        </div>
+      `).join('');
+      list.querySelectorAll('.turn').forEach(el => {
+        el.onclick = () => openTurn(el.dataset.id);
+      });
+    }
+
+    async function openTurn(turnId) {
+      currentTurnId = turnId;
+      await loadTurns();
+      const res = await fetch(`/api/agent/turns/${encodeURIComponent(turnId)}?session_id=${encodeURIComponent(sid())}`);
+      if (!res.ok) {
+        $('detail').innerHTML = '<div class="empty">未找到该轮次</div>';
+        return;
+      }
+      const turn = await res.json();
+      renderDetail(turn);
+    }
+
+    function renderDetail(turn) {
+      const steps = turn.steps || [];
+      $('detail').innerHTML = `
+        <div class="tabs">
+          <button class="${viewMode==='trace'?'active':''}" id="tabTrace">轨迹</button>
+          <button class="ghost ${viewMode==='json'?'active':''}" id="tabJson">原始 JSON</button>
+        </div>
+        <dl class="kv">
+          <dt>turn_id</dt><dd><code>${escapeHtml(turn.turn_id)}</code></dd>
+          <dt>query</dt><dd>${escapeHtml(turn.query || '')}</dd>
+          <dt>intent / status</dt><dd><span class="badge ${statusClass(turn.status)}">${turn.status}</span> · ${escapeHtml(turn.intent || '-')}</dd>
+          <dt>time</dt><dd>${fmtTime(turn.started_at)} → ${fmtTime(turn.ended_at)}</dd>
+          <dt>tools</dt><dd>${(turn.tool_names||[]).join(', ') || '-'}</dd>
+          <dt>metrics</dt><dd><code>${escapeHtml(JSON.stringify(turn.metrics || {}))}</code></dd>
+          <dt>answer</dt><dd>${escapeHtml(turn.answer_preview || '')}</dd>
+        </dl>
+        <div id="bodyView"></div>
+      `;
+      const body = $('bodyView');
+      const paint = () => {
+        if (viewMode === 'json') {
+          body.innerHTML = `<pre>${escapeHtml(JSON.stringify(turn, null, 2))}</pre>`;
+        } else {
+          body.innerHTML = `<ul class="timeline">${steps.map(s => `
+            <li class="${s.status || ''}">
+              <div class="step-title">${escapeHtml(s.type)} · ${escapeHtml(s.title)}</div>
+              <div class="step-meta">${fmtTime(s.ts)} · ${escapeHtml(s.status || 'ok')}</div>
+              ${s.detail && Object.keys(s.detail).length ? `<pre>${escapeHtml(JSON.stringify(s.detail, null, 2))}</pre>` : ''}
+            </li>
+          `).join('')}</ul>`;
+        }
+      };
+      paint();
+      $('tabTrace').onclick = () => { viewMode = 'trace'; renderDetail(turn); };
+      $('tabJson').onclick = () => { viewMode = 'json'; renderDetail(turn); };
+    }
+
+    function escapeHtml(s) {
+      return String(s)
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;');
+    }
+
+    $('refreshBtn').onclick = loadTurns;
+    $('compactBtn').onclick = async () => {
+      await fetch(`/api/agent/compact?session_id=${encodeURIComponent(sid())}`, { method: 'POST' });
+      alert('已请求压缩');
+      loadTurns();
+    };
+    $('sessionId').addEventListener('change', loadTurns);
+    loadTurns();
+  </script>
+</body>
+</html>

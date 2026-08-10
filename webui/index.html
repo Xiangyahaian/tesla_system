@@ -161,7 +161,13 @@
         }
     </style>
 </head>
-<body class="h-screen w-screen flex overflow-hidden">
+<body class="h-screen w-screen flex overflow-hidden relative">
+
+    <!-- 右上角独立入口，不挤在操作按钮区 -->
+    <a href="/agent" target="_blank"
+       class="fixed top-4 right-4 z-50 px-3 py-1.5 text-sm font-medium text-gray-700 bg-white border border-gray-200 rounded-lg shadow-sm hover:bg-gray-50 hover:text-gray-900 transition-colors">
+        Agent轨迹
+    </a>
 
     <div class="w-[450px] bg-white border-r border-gray-200 flex flex-col flex-shrink-0">
         <div class="p-6 border-b border-gray-100 bg-gray-50/50">

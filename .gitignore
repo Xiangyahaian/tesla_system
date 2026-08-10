@@ -18,6 +18,7 @@ vllm_tesla.log
 log/
 state/state.json
 state/memory.json
+state/sessions/
 
 # ===== python / notebooks =====
 __pycache__/

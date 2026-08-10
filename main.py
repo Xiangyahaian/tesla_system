@@ -1,10 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-Tesla多意图Agent - 主入口 (双模型版本)
+[LEGACY] Tesla多意图Agent - 旧入口
 
-同时支持本地vLLM和远程API(阿里百炼)，可动态切换
-用法:
-    python main4.py [--port 6006]
+请改用新架构：
+    python run.py
+    # 或 python -m app.api.server
+
+详见 LEGACY.md / CHANGES_V2.md
 """
 import importlib
 import importlib
