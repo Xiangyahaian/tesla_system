@@ -48,7 +48,11 @@ AGENT_ENABLE_AUTO_MEMORY = os.getenv("AGENT_ENABLE_AUTO_MEMORY", "1") != "0"
 
 STATE_DIR = BASE_DIR / "state"
 SESSIONS_DIR = STATE_DIR / "sessions"
-# 默认使用原有 webui（不要替换用户现有界面）
+# 默认使用用户原有 webui（不要替换用户现有界面）
 WEBUI_DIR = BASE_DIR / "webui"
 ALT_WEBUI_DIR = BASE_DIR / "app" / "web"
+FRONTEND_DIR = BASE_DIR / "frontend"
+FRONTEND_DIST = FRONTEND_DIR / "dist"
+# 有构建产物时优先托管 React 座舱 HMI
+PREFER_CABIN_HMI = os.getenv("PREFER_CABIN_HMI", "1") != "0"
 PDF_PATH = BASE_DIR / "static" / "pdf" / "Tesla_Manual.pdf"

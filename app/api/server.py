@@ -16,6 +16,7 @@ if str(ROOT) not in sys.path:
 import uvicorn
 from fastapi import FastAPI, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from app import config
@@ -25,9 +26,11 @@ from app.orchestrator.runtime import get_orchestrator
 from app.session.store import get_session_store
 from app.tools.registry import get_registry
 
-app = FastAPI(title="Tesla Cabin Runtime", version="2.0.0")
-# 固定使用用户原有 webui/，不替换界面
+app = FastAPI(title="Tesla Cabin Runtime", version="3.0.0")
+# legacy webui 模板
 templates = Jinja2Templates(directory=str(config.WEBUI_DIR))
+CABIN_DIST = config.FRONTEND_DIST
+HAS_CABIN_HMI = CABIN_DIST.exists() and (CABIN_DIST / "index.html").exists()
 
 
 @app.on_event("startup")
@@ -37,7 +40,6 @@ async def startup():
     if config.RESET_ON_STARTUP:
         get_session_store().reset("default")
 
-    # 与旧版一致：启动时预热知识库，首问不再卡在加载模型
     if config.RAG_ENABLE and config.RAG_WARMUP_ON_STARTUP:
         try:
             from app.rag.service import get_rag_service
@@ -47,15 +49,29 @@ async def startup():
             print(f"[RAG] 启动预热失败（知识问答可能首问较慢）: {e}")
 
     print(f"[CabinRuntime] ready on http://{config.HOST}:{config.PORT}")
-    print(f"[CabinRuntime] UI: {config.WEBUI_DIR / 'index.html'}")
+    if HAS_CABIN_HMI and config.PREFER_CABIN_HMI:
+        print(f"[CabinRuntime] HMI: {CABIN_DIST}")
+        print(f"[CabinRuntime] Legacy UI: /legacy")
+    else:
+        print(f"[CabinRuntime] UI: {config.WEBUI_DIR / 'index.html'}")
 
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
+    if HAS_CABIN_HMI and config.PREFER_CABIN_HMI:
+        return FileResponse(CABIN_DIST / "index.html")
     index_path = config.WEBUI_DIR / "index.html"
     if index_path.exists():
         return templates.TemplateResponse("index.html", {"request": request})
-    return HTMLResponse("<h1>webui/index.html missing</h1>", status_code=404)
+    return HTMLResponse("<h1>UI missing. Build frontend or restore webui/index.html</h1>", status_code=404)
+
+
+@app.get("/legacy", response_class=HTMLResponse)
+async def legacy_ui(request: Request):
+    index_path = config.WEBUI_DIR / "index.html"
+    if index_path.exists():
+        return templates.TemplateResponse("index.html", {"request": request})
+    return HTMLResponse("<h1>legacy webui missing</h1>", status_code=404)
 
 
 @app.get("/api/model-status", response_class=JSONResponse)
@@ -260,6 +276,13 @@ async def chat(req: ChatRequest):
             "Connection": "keep-alive",
         },
     )
+
+
+# React 座舱静态资源（Vite build → frontend/dist）
+if HAS_CABIN_HMI:
+    assets_dir = CABIN_DIST / "assets"
+    if assets_dir.exists():
+        app.mount("/assets", StaticFiles(directory=str(assets_dir)), name="cabin-assets")
 
 
 def main():

@@ -66,6 +66,7 @@ class AgentLoop:
         route = initial_route
         exec_fn = execute or (lambda c: self.registry.execute(gateway, c))
         feedback = ""
+        last_feedback = ""
 
         for i in range(1, self.max_iterations + 1):
             result.iterations = i
@@ -76,7 +77,11 @@ class AgentLoop:
                 if feedback:
                     hint = f"{memory_hint}\n上次工具反馈:{feedback}"
                 yield LoopEvent("log", "gather: StructuredNLU 规划")
-                route = nlu.plan(query if not feedback else f"{query}\n(纠正/重试依据:{feedback})", vehicle_state, hint)
+                route = nlu.plan(
+                    query if not feedback else f"{query}\n(纠正/重试依据:{feedback})",
+                    vehicle_state,
+                    hint,
+                )
                 result.llm_calls += 1
                 result.route = route
                 if route.intent not in {IntentType.TOOL, IntentType.MULTI_TOOL} or not route.tool_calls:
@@ -129,13 +134,17 @@ class AgentLoop:
                 )
 
             result.results = results
-            # verify
             if all(r.success for r in results):
                 yield LoopEvent("final_tools", [r.model_dump() for r in results])
                 return result
 
             feedback = "；".join(f"{r.tool or '?'}:{r.message}" for r in results)
-            route = None  # 触发下一轮重规划
+            if feedback and feedback == last_feedback:
+                yield LoopEvent("log", "verify: 相同错误重复，停止重试")
+                yield LoopEvent("final_tools", [r.model_dump() for r in results])
+                return result
+            last_feedback = feedback
+            route = None
             yield LoopEvent("log", "verify: 存在失败，准备重规划")
 
         yield LoopEvent("log", "loop 达到最大迭代，停止")
