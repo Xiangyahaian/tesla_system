@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""规范 Agent 轨迹：每轮 Turn + 有序 Step，持久化 JSONL，可供 UI/API 查询。"""
+"""规范 Agent 轨迹：每轮 Turn + 有序 Step，JSONL + SQLite 双写。"""
 from __future__ import annotations
 
 import json
@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
+
+from app.session.db import SessionDatabase
 
 
 class StepType(str, Enum):
@@ -107,27 +109,52 @@ class TurnTrace(BaseModel):
 
 
 class TraceStore:
-    """turns.jsonl：每行一个完整 TurnTrace。"""
+    """turns.jsonl + SQLite。"""
 
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, *, db: Optional[SessionDatabase] = None, session_id: Optional[str] = None):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._db = db
+        self._session_id = session_id
 
     def clear(self) -> None:
         if self.path.exists():
             self.path.unlink()
+        if self._db and self._session_id:
+            with self._db._lock:
+                self._db._conn.execute(
+                    "DELETE FROM turns WHERE session_id = ?", (self._session_id,)
+                )
+                self._db._conn.execute(
+                    "UPDATE sessions SET turn_count = 0, updated_at = ? WHERE id = ?",
+                    (time.time(), self._session_id),
+                )
+                self._db._conn.commit()
 
     def append_turn(self, turn: TurnTrace) -> None:
         with self.path.open("a", encoding="utf-8") as f:
             f.write(turn.model_dump_json(ensure_ascii=False) + "\n")
+        if self._db and self._session_id:
+            self._db.append_turn(self._session_id, turn)
 
     def list_turns(self, limit: int = 50, offset: int = 0) -> List[Dict[str, Any]]:
+        if self._db and self._session_id:
+            rows = self._db.list_turns(self._session_id, limit=limit, offset=offset)
+            if rows or not self.path.exists():
+                return rows
         turns = self._load_all()
-        turns.reverse()  # 新在前
+        turns.reverse()
         slice_ = turns[offset : offset + limit]
         return [t.summary() for t in slice_]
 
     def get_turn(self, turn_id: str) -> Optional[TurnTrace]:
+        if self._db and self._session_id:
+            data = self._db.get_turn(self._session_id, turn_id)
+            if data:
+                try:
+                    return TurnTrace.model_validate(data)
+                except Exception:
+                    pass
         for t in reversed(self._load_all()):
             if t.turn_id == turn_id:
                 return t

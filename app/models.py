@@ -56,6 +56,8 @@ class RouteResult(BaseModel):
     reason: str = ""
     tool_calls: List[ToolCall] = Field(default_factory=list)
     needs_llm_plan: bool = False
+    # 本步执行完后，用户整句请求是否已处理完（需等用户选点 / 还有后续能力时为 False）
+    done: bool = True
 
 
 class PolicyDecision(BaseModel):
@@ -64,12 +66,16 @@ class PolicyDecision(BaseModel):
     risk: RiskLevel = RiskLevel.LOW
     message: str = ""
     blocked_reason: str = ""
+    # safety=车控高风险；privacy=读消息等隐私确认（非车辆安全）
+    confirm_kind: str = "safety"
 
 
 class PendingAction(BaseModel):
     tool_calls: List[ToolCall]
     summary: str
     risk: RiskLevel = RiskLevel.HIGH
+    confirm_kind: str = "safety"
+    message: str = ""
 
 
 class ToolResult(BaseModel):
@@ -84,6 +90,14 @@ class ChatRequest(BaseModel):
     session_id: str = "default"
     model: str = "remote"  # remote | local
     confirm: Optional[bool] = None  # True/False 用于确认门控
+    active_seat: Optional[str] = None  # front_left / front_right / ...
+
+
+class ControlRequest(BaseModel):
+    """中控屏直接控车（绕过对话，写 canonical state）。"""
+    tool: str
+    arguments: Dict[str, Any] = Field(default_factory=dict)
+    session_id: str = "default"
 
 
 class ModelStatus(BaseModel):

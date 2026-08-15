@@ -2,13 +2,20 @@ import { useEffect, useState } from "react";
 import { fetchModelStatus, fetchTools } from "@/lib/api";
 import { useCabinStore } from "@/store/cabinStore";
 import { TopBar } from "@/components/layout/TopBar";
+import { SessionManagerPanel } from "@/components/session/SessionManagerPanel";
+import { ManualPreviewButton } from "@/components/drive/ManualPreviewButton";
 
 export function SettingsPage() {
   const model = useCabinStore((s) => s.model);
   const setModel = useCabinStore((s) => s.setModel);
   const ttsEnabled = useCabinStore((s) => s.ttsEnabled);
   const setTtsEnabled = useCabinStore((s) => s.setTtsEnabled);
+  const ttsVolume = useCabinStore((s) => s.ttsVolume);
+  const setTtsVolume = useCabinStore((s) => s.setTtsVolume);
   const sessionId = useCabinStore((s) => s.sessionId);
+  const sessionTitle = useCabinStore((s) => s.sessionTitle);
+  const userNickname = useCabinStore((s) => s.userNickname);
+  const clearUser = useCabinStore((s) => s.clearUser);
   const [tools, setTools] = useState<
     { name: string; description: string; risk: string; domain: string }[]
   >([]);
@@ -28,36 +35,90 @@ export function SettingsPage() {
 
   return (
     <div className="page-settings">
-      <TopBar title="Setup" subtitle="模型 · 语音 · 工具目录" />
+      <TopBar title="系统设置" subtitle="会话管理、模型、语音播报与工具注册表" />
       <div className="settings-body">
-        <section className="settings-card">
-          <h3>会话</h3>
+        <section className="settings-card wide">
+          <h3>用户</h3>
           <div className="settings-row">
-            <span>Session ID</span>
-            <code>{sessionId}</code>
+            <span>当前昵称</span>
+            <code>{userNickname || "未登录"}</code>
           </div>
           <div className="settings-row">
-            <span>LLM</span>
+            <span>独立记忆</span>
+            <span>每个昵称对应 SQLite 用户记录 + 独立 session / MEMORY.md</span>
+          </div>
+          <div className="settings-row">
+            <span>切换用户</span>
+            <button type="button" className="deck-inline-btn" onClick={() => clearUser()}>
+              退出并更换昵称
+            </button>
+          </div>
+        </section>
+
+        <section className="settings-card wide">
+          <h3>会话管理（SQLite）</h3>
+          <div className="settings-row">
+            <span>当前会话</span>
+            <code>
+              {sessionTitle} · {sessionId}
+            </code>
+          </div>
+          <SessionManagerPanel />
+        </section>
+
+        <section className="settings-card">
+          <h3>通用</h3>
+          <div className="settings-row">
+            <span>用户手册</span>
+            <ManualPreviewButton />
+          </div>
+          <div className="settings-row">
+            <span>大模型</span>
             <select
               className="model-select"
               value={model}
               onChange={(e) => setModel(e.target.value as "remote" | "local")}
             >
-              <option value="remote">Qwen Flash（远程）</option>
-              <option value="local">Local</option>
+              <option value="remote">云端模型</option>
+              <option value="local">本地模型</option>
             </select>
           </div>
           <div className="settings-row">
-            <span>TTS 播报</span>
+            <span>开启声音</span>
             <button
               type="button"
               className={`toggle${ttsEnabled ? " on" : ""}`}
-              onClick={() => setTtsEnabled(!ttsEnabled)}
+              onClick={() => {
+                const next = !ttsEnabled;
+                setTtsEnabled(next);
+                if (next) {
+                  void import("@/lib/speech").then((m) => m.unlockAudioPlayback());
+                }
+              }}
               aria-pressed={ttsEnabled}
             >
-              {ttsEnabled ? "开启" : "关闭"}
+              {ttsEnabled ? "已开启" : "已关闭"}
             </button>
           </div>
+          <div className={`settings-row settings-volume${ttsEnabled ? "" : " dimmed"}`}>
+            <span>音量</span>
+            <div className="volume-control">
+              <input
+                type="range"
+                min={0}
+                max={100}
+                step={1}
+                value={Math.round(ttsVolume * 100)}
+                disabled={!ttsEnabled}
+                onChange={(e) => setTtsVolume(Number(e.target.value) / 100)}
+                aria-label="语音播报音量"
+              />
+              <em>{Math.round(ttsVolume * 100)}%</em>
+            </div>
+          </div>
+          <p className="settings-hint">
+            语音输入：千问 ASR（qwen3-asr-flash）· 语音输出：CosyVoice 女声 longanhuan（情感 Instruct + 流式）
+          </p>
         </section>
 
         <section className="settings-card">

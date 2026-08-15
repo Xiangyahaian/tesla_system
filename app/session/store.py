@@ -1,13 +1,15 @@
 # -*- coding: utf-8 -*-
-"""会话隔离：车况 + transcript + 记忆 + pending（Claude Code 风格目录布局）。
+"""会话隔离：车况文件 + transcript/turns（JSONL）+ SQLite 索引。
 
 state/sessions/<id>/
   vehicle.json
   transcript.jsonl
-  turns.jsonl           # 每轮 Agent 轨迹
+  turns.jsonl
   session.json
   CABIN.md
   memory/MEMORY.md
+
+权威会话列表与对话回放：state/cabin_sessions.db（含 users / sessions / messages / turns）
 """
 from __future__ import annotations
 
@@ -28,6 +30,7 @@ from app.agent.transcript import TranscriptStore
 from app.agent.types import MessageRole
 from app.gateway.stub import StubVehicleGateway
 from app.models import PendingAction
+from app.session.db import SessionDatabase, get_session_db
 
 
 @dataclass
@@ -40,10 +43,10 @@ class SessionData:
     traces: TraceStore
     slots: Dict[str, Any] = field(default_factory=dict)
     pending: Optional[PendingAction] = None
-    # 兼容旧字段：派生自 transcript，勿再当作唯一真相
     memory_compat: List[Dict[str, str]] = field(default_factory=list)
     last_active: float = field(default_factory=time.time)
     compact_failures: int = 0
+    title: str = "新会话"
 
     def touch(self) -> None:
         self.last_active = time.time()
@@ -57,17 +60,23 @@ class SessionData:
 
 
 class SessionStore:
-    def __init__(self, root: Optional[Path] = None):
+    def __init__(self, root: Optional[Path] = None, db: Optional[SessionDatabase] = None):
         self.root = Path(root or config.SESSIONS_DIR)
         self.root.mkdir(parents=True, exist_ok=True)
         self._sessions: Dict[str, SessionData] = {}
         self._lock = threading.RLock()
+        self.db = db or get_session_db()
         self.assembler = ContextAssembler()
         self.compactor = ContextCompactor(
             soft_limit_chars=config.AGENT_SOFT_CONTEXT_CHARS,
             hard_limit_chars=config.AGENT_HARD_CONTEXT_CHARS,
             keep_recent=config.AGENT_KEEP_RECENT_MESSAGES,
         )
+        self.db.ensure_session("default", title="默认会话")
+        try:
+            self.db.migrate_users_from_sessions()
+        except Exception:
+            pass
 
     def _safe_id(self, session_id: str) -> str:
         return "".join(c if c.isalnum() or c in "-_" else "_" for c in session_id)[:64] or "default"
@@ -78,7 +87,6 @@ class SessionStore:
         return d
 
     def _migrate_legacy_flat_json(self, session_id: str, session_dir: Path) -> None:
-        """旧布局 state/sessions/default.json → default/vehicle.json"""
         legacy = self.root / f"{self._safe_id(session_id)}.json"
         vehicle = session_dir / "vehicle.json"
         if legacy.exists() and not vehicle.exists():
@@ -93,31 +101,53 @@ class SessionStore:
     def get(self, session_id: str = "default") -> SessionData:
         with self._lock:
             self._purge_expired()
-            if session_id not in self._sessions:
-                sdir = self._session_dir(session_id)
-                self._migrate_legacy_flat_json(session_id, sdir)
+            sid = self._safe_id(session_id)
+            if sid not in self._sessions:
+                sdir = self._session_dir(sid)
+                self._migrate_legacy_flat_json(sid, sdir)
+                meta = self.db.ensure_session(sid)
                 gw = StubVehicleGateway(sdir / "vehicle.json")
-                tr = TranscriptStore(sdir / "transcript.jsonl")
+                tr = TranscriptStore(sdir / "transcript.jsonl", db=self.db, session_id=sid)
                 mem = MemoryStore(sdir)
-                traces = TraceStore(sdir / "turns.jsonl")
+                traces = TraceStore(sdir / "turns.jsonl", db=self.db, session_id=sid)
                 sess = SessionData(
-                    session_id=session_id,
+                    session_id=sid,
                     root=sdir,
                     gateway=gw,
                     transcript=tr,
                     memory=mem,
                     traces=traces,
+                    title=str(meta.get("title") or ("默认会话" if sid == "default" else "新会话")),
                 )
-                self._load_session_json(sess)
-                self._sessions[session_id] = sess
-            sess = self._sessions[session_id]
+                self._load_session_meta(sess)
+                self._sessions[sid] = sess
+            sess = self._sessions[sid]
             sess.touch()
+            self.db.touch(sid)
             return sess
 
     def _session_json_path(self, sess: SessionData) -> Path:
         return sess.root / "session.json"
 
-    def _load_session_json(self, sess: SessionData) -> None:
+    def _load_session_meta(self, sess: SessionData) -> None:
+        # 优先 SQLite
+        try:
+            data = self.db.load_meta(sess.session_id)
+            sess.slots = data.get("slots") or {}
+            sess.last_active = float(data.get("last_active") or time.time())
+            sess.compact_failures = int(data.get("compact_failures") or 0)
+            sess.memory_compat = data.get("memory") or []
+            sess.title = str(data.get("title") or sess.title)
+            pending = data.get("pending")
+            if pending:
+                try:
+                    sess.pending = PendingAction.model_validate(pending)
+                except Exception:
+                    sess.pending = None
+            return
+        except Exception:
+            pass
+
         path = self._session_json_path(sess)
         if not path.exists():
             return
@@ -134,13 +164,13 @@ class SessionStore:
                 sess.pending = PendingAction.model_validate(pending)
             except Exception:
                 sess.pending = None
-        # 兼容旧 memory 列表
         sess.memory_compat = data.get("memory") or []
 
     def save(self, sess: SessionData) -> None:
         path = self._session_json_path(sess)
         payload = {
             "session_id": sess.session_id,
+            "title": sess.title,
             "slots": sess.slots,
             "pending": sess.pending.model_dump() if sess.pending else None,
             "memory": sess.memory_compat[-20:],
@@ -151,6 +181,15 @@ class SessionStore:
         tmp = path.with_suffix(".tmp")
         tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         tmp.replace(path)
+        self.db.upsert_meta(
+            sess.session_id,
+            slots=sess.slots,
+            pending=sess.pending,
+            memory_compat=sess.memory_compat[-20:],
+            compact_failures=sess.compact_failures,
+            transcript_chars=payload["transcript_chars"],
+            title=sess.title,
+        )
 
     def reset(self, session_id: str = "default") -> Dict[str, Any]:
         sess = self.get(session_id)
@@ -161,33 +200,157 @@ class SessionStore:
         sess.compact_failures = 0
         sess.transcript.clear()
         sess.traces.clear()
-        # 保留 CABIN.md，清空 auto memory 内容但保留文件头
-        from app.agent.memory import DEFAULT_MEMORY_MD
-
-        sess.memory.memory_md.write_text(DEFAULT_MEMORY_MD, encoding="utf-8")
+        # Claude Code 同款：重置话题/车况时保留 Auto Memory（preferences.json + MEMORY.md）
+        prefs = sess.memory.load_preferences()
+        sess.memory.rewrite_memory_md(prefs)
+        self.db.clear_session_content(sess.session_id)
+        if sess.session_id == "default":
+            sess.title = "默认会话"
+            self.db.rename_session(sess.session_id, "默认会话")
+        else:
+            sess.title = "新会话"
+            self.db.rename_session(sess.session_id, "新会话")
         self.save(sess)
         return state
 
-    def list_sessions(self) -> List[Dict[str, Any]]:
-        items = []
-        for d in sorted(self.root.iterdir() if self.root.exists() else []):
-            if not d.is_dir():
-                continue
-            sid = d.name
-            turns_path = d / "turns.jsonl"
-            tr_path = d / "transcript.jsonl"
-            turn_n = 0
-            if turns_path.exists():
-                turn_n = sum(1 for line in turns_path.read_text(encoding="utf-8").splitlines() if line.strip())
-            items.append(
+    def nickname_to_session_id(self, nickname: str) -> str:
+        import hashlib
+        import re
+
+        nick = (nickname or "").strip()[:24]
+        if not nick:
+            raise ValueError("昵称不能为空")
+        digest = hashlib.sha1(nick.encode("utf-8")).hexdigest()[:10]
+        ascii_part = re.sub(r"[^a-zA-Z0-9]+", "", nick)[:12] or "user"
+        return self._safe_id(f"u_{ascii_part}_{digest}")
+
+    def ensure_user(self, nickname: str) -> SessionData:
+        """按昵称得到稳定 session（独立记忆目录），同昵称复用；登录写入 SQLite users。"""
+        nick = (nickname or "").strip()[:24]
+        if not nick:
+            raise ValueError("昵称不能为空")
+        # 优先读库中已登记用户，保证昵称大小写变体仍落到同一账号
+        existing = self.db.get_user_by_nickname(nick)
+        sid = existing["session_id"] if existing else self.nickname_to_session_id(nick)
+        with self._lock:
+            user = self.db.upsert_user_login(nick, sid)
+            sess = self.get(user["session_id"])
+            sess.title = user["nickname"]
+            sess.slots["nickname"] = user["nickname"]
+            sess.slots["user_id"] = user["id"]
+            try:
+                from app.agent.memory import PreferenceDelta
+
+                prefs = sess.memory.load_preferences()
+                if prefs.get("display_name") != user["nickname"]:
+                    sess.memory.upsert_preferences(
+                        PreferenceDelta(display_name=user["nickname"], notes=[f"用户昵称：{user['nickname']}"])
+                    )
+            except Exception:
+                pass
+            self.save(sess)
+            return sess
+
+    def list_users(self) -> List[Dict[str, Any]]:
+        """列出 SQLite users 表中的昵称用户。"""
+        out: List[Dict[str, Any]] = []
+        for u in self.db.list_users():
+            out.append(
                 {
-                    "session_id": sid,
-                    "path": str(d),
-                    "turn_count": turn_n,
-                    "has_vehicle": (d / "vehicle.json").exists(),
-                    "has_transcript": tr_path.exists(),
+                    "id": u.get("id"),
+                    "session_id": u["session_id"],
+                    "nickname": u["nickname"],
+                    "title": u.get("title") or u["nickname"],
+                    "created_at": u.get("created_at"),
+                    "last_login_at": u.get("last_login_at"),
+                    "login_count": u.get("login_count", 0),
+                    "updated_at": u.get("updated_at") or u.get("last_login_at"),
                 }
             )
+        return out
+
+    def create_session(self, title: Optional[str] = None) -> SessionData:
+        with self._lock:
+            sid = self.db.create_session(title=title or "新会话")
+            # 预创建目录与空车况
+            sess = self.get(sid)
+            sess.title = title or "新会话"
+            self.save(sess)
+            return sess
+
+    def rename_session(self, session_id: str, title: str) -> bool:
+        ok = self.db.rename_session(self._safe_id(session_id), title)
+        if ok:
+            sid = self._safe_id(session_id)
+            if sid in self._sessions:
+                self._sessions[sid].title = title.strip()[:80]
+                self.save(self._sessions[sid])
+        return ok
+
+    def delete_session(self, session_id: str) -> Dict[str, Any]:
+        sid = self._safe_id(session_id)
+        if sid == "default":
+            return {"ok": False, "error": "默认会话不可删除，可使用重置"}
+        with self._lock:
+            if sid in self._sessions:
+                try:
+                    self.save(self._sessions[sid])
+                except Exception:
+                    pass
+                self._sessions.pop(sid, None)
+            self.db.delete_session(sid, hard=True)
+            sdir = self.root / sid
+            if sdir.exists() and sdir.is_dir():
+                shutil.rmtree(sdir, ignore_errors=True)
+            return {"ok": True, "session_id": sid}
+
+    def purge_all_sessions(self) -> Dict[str, Any]:
+        """删除全部用户会话与用户记录，仅保留并重置 default。"""
+        with self._lock:
+            items = self.db.list_sessions(include_deleted=True)
+            deleted: List[str] = []
+            for it in items:
+                sid = str(it.get("session_id") or "")
+                if not sid or sid == "default":
+                    continue
+                self._sessions.pop(sid, None)
+                self.db.delete_session(sid, hard=True)
+                sdir = self.root / sid
+                if sdir.exists() and sdir.is_dir():
+                    shutil.rmtree(sdir, ignore_errors=True)
+                deleted.append(sid)
+            users_n = self.db.delete_all_users()
+            if self.root.exists():
+                for d in list(self.root.iterdir()):
+                    if d.is_dir() and d.name != "default":
+                        shutil.rmtree(d, ignore_errors=True)
+                        if d.name not in deleted:
+                            deleted.append(d.name)
+            # 清空内存缓存后重置默认会话
+            self._sessions.clear()
+            self.reset("default")
+            return {
+                "ok": True,
+                "deleted": deleted,
+                "count": len(deleted),
+                "users_cleared": users_n,
+            }
+
+    def list_sessions(self) -> List[Dict[str, Any]]:
+        items = self.db.list_sessions()
+        # 补齐磁盘存在但偶发未入 DB 的目录
+        if self.root.exists():
+            known = {i["session_id"] for i in items}
+            for d in self.root.iterdir():
+                if d.is_dir() and d.name not in known:
+                    self.db.ensure_session(d.name)
+            items = self.db.list_sessions()
+        for it in items:
+            sid = it["session_id"]
+            sdir = self.root / sid
+            it["path"] = str(sdir)
+            it["has_vehicle"] = (sdir / "vehicle.json").exists()
+            it["has_transcript"] = (sdir / "transcript.jsonl").exists() or int(it.get("message_count") or 0) > 0
         return items
 
     def maybe_compact(self, sess: SessionData, llm=None, force: bool = False):

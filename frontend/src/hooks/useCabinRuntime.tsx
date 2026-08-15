@@ -9,13 +9,50 @@ import {
   useRef,
   useState,
 } from "react";
-import { fetchCabinState, resetCabin, streamChat } from "@/lib/api";
-import { getSpeechRecognition, speakText, stopSpeaking } from "@/lib/speech";
+import { fetchCabinState, fetchSessionMessages, resetCabin, streamChat } from "@/lib/api";
+import { extractAnswer, normalizeContexts } from "@/lib/answer";
+import { recognizeBlob, speakText, startMicRecording, stopSpeaking, unlockAudioPlayback, type MicRecorder } from "@/lib/speech";
 import { useCabinStore } from "@/store/cabinStore";
-import type { ChatMessage, TraceStep } from "@/lib/types";
+import type { CabinStateSnapshot, ChatMessage, TraceStep } from "@/lib/types";
+import { isSeatId } from "@/lib/seats";
 
 function uid() {
   return Math.random().toString(36).slice(2, 10);
+}
+
+/** 取首句短文本，尽早开 TTS 以降延迟 */
+function pickSpeakText(answer: string): string {
+  const flat = answer
+    .replace(/^>.*$/gm, "")
+    .replace(/【\d+(?:\s*[,，、]\s*\d+)*】/g, "")
+    .replace(/^参考[:：].*$/gm, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!flat) return "";
+  // 更短触发：8–72 字遇到句读就开播
+  const m = flat.match(/^[\s\S]{8,72}?[。！？!?]/);
+  if (m) return m[0].trim();
+  if (flat.length >= 24) return flat.slice(0, 48);
+  return flat.slice(0, 72);
+}
+
+function transcriptToChat(messages: { role: string; content: string; ts?: number }[]): ChatMessage[] {
+  const out: ChatMessage[] = [];
+  for (const m of messages) {
+    if (m.role !== "user" && m.role !== "assistant") continue;
+    const content = (m.content || "").trim();
+    if (!content) continue;
+    // 过滤内部 trace 风格的过程行（以 > 开头的 harness 日志）
+    if (m.role === "assistant" && content.startsWith("> **[")) {
+      const parts = content.split(/\n\n---\n\n/);
+      const human = parts.length > 1 ? parts[parts.length - 1].trim() : "";
+      if (!human || human.startsWith(">")) continue;
+      out.push({ id: uid(), role: "assistant", content: human });
+      continue;
+    }
+    out.push({ id: uid(), role: m.role, content });
+  }
+  return out;
 }
 
 type CabinRuntime = {
@@ -27,6 +64,8 @@ type CabinRuntime = {
   onHoldEnd: () => void;
   refreshState: () => Promise<void>;
   doReset: () => Promise<void>;
+  switchSession: (sessionId: string, title?: string) => Promise<void>;
+  reloadMessages: () => Promise<void>;
 };
 
 const Ctx = createContext<CabinRuntime | null>(null);
@@ -34,12 +73,16 @@ const Ctx = createContext<CabinRuntime | null>(null);
 export function CabinRuntimeProvider({ children }: { children: ReactNode }) {
   const [draft, setDraft] = useState("");
   const recognizingRef = useRef(false);
-  const transcriptRef = useRef("");
+  const micRef = useRef<MicRecorder | null>(null);
+  const holdActiveRef = useRef(false);
 
   const sessionId = useCabinStore((s) => s.sessionId);
   const model = useCabinStore((s) => s.model);
   const busy = useCabinStore((s) => s.busy);
   const ttsEnabled = useCabinStore((s) => s.ttsEnabled);
+  const ttsVolume = useCabinStore((s) => s.ttsVolume);
+  const activeSeat = useCabinStore((s) => s.activeSeat);
+  const setActiveSeat = useCabinStore((s) => s.setActiveSeat);
   const setPhase = useCabinStore((s) => s.setPhase);
   const setBusy = useCabinStore((s) => s.setBusy);
   const setError = useCabinStore((s) => s.setError);
@@ -50,25 +93,35 @@ export function CabinRuntimeProvider({ children }: { children: ReactNode }) {
   const appendLiveText = useCabinStore((s) => s.appendLiveText);
   const addLiveStep = useCabinStore((s) => s.addLiveStep);
   const pushMessage = useCabinStore((s) => s.pushMessage);
+  const setMessages = useCabinStore((s) => s.setMessages);
   const setContexts = useCabinStore((s) => s.setContexts);
   const clearChat = useCabinStore((s) => s.clearChat);
+  const setSessionId = useCabinStore((s) => s.setSessionId);
+
+  const reloadMessages = useCallback(async () => {
+    if (!sessionId) return;
+    try {
+      const data = await fetchSessionMessages(sessionId, 300);
+      setMessages(transcriptToChat(data.messages || []));
+      if (data.title) useCabinStore.getState().setSessionTitle(data.title);
+    } catch {
+      /* 首次无历史时忽略 */
+    }
+  }, [sessionId, setMessages]);
 
   const refreshState = useCallback(async () => {
+    if (!sessionId) return;
+    const epoch = useCabinStore.getState().vehicleEpoch;
     try {
       const data = await fetchCabinState(sessionId);
+      const now = useCabinStore.getState();
+      // 重置过程中的旧轮询结果不要盖住刚写入的南门快照
+      if (now.resetInFlight || now.vehicleEpoch !== epoch) return;
       setVehicle(data.state);
       setAgentMeta(data.agent ?? null);
       if (data.pending) {
-        const p = data.pending as {
-          message?: string;
-          summary?: string;
-          risk?: string | { value?: string };
-        };
-        setConfirm({
-          message: p.message || "该操作涉及车辆安全，请确认后执行。",
-          summary: p.summary || "",
-          risk: typeof p.risk === "string" ? p.risk : p.risk?.value || "high",
-        });
+        // 后端仍有 pending，但前端不弹窗；用户用输入/语音说确认或取消
+        setConfirm(null);
       } else {
         setConfirm(null);
       }
@@ -79,14 +132,15 @@ export function CabinRuntimeProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     void refreshState();
+    void reloadMessages();
     const t = window.setInterval(() => void refreshState(), 3500);
     return () => window.clearInterval(t);
-  }, [refreshState]);
+  }, [refreshState, reloadMessages]);
 
   const runQuery = useCallback(
     async (query: string, confirm: boolean | null = null) => {
       const q = query.trim();
-      if (!q || busy) return;
+      if (!q || busy || !sessionId) return;
 
       stopSpeaking();
       setBusy(true);
@@ -102,30 +156,64 @@ export function CabinRuntimeProvider({ children }: { children: ReactNode }) {
 
       let finalAnswer = "";
       const collectedSteps: TraceStep[] = [];
+      let collectedContexts = normalizeContexts([]);
+      let earlyTtsStarted = false;
+      let ttsPromise: Promise<void> | null = null;
+
+      const startTts = (text: string) => {
+        const spoken = pickSpeakText(text);
+        if (!spoken || !ttsEnabled || earlyTtsStarted) return;
+        earlyTtsStarted = true;
+        setPhase("speaking");
+        ttsPromise = speakText(spoken, ttsVolume).catch((e) => {
+          setError(e instanceof Error ? e.message : "语音播报失败");
+        });
+      };
 
       try {
         await streamChat(q, {
           sessionId,
           model,
           confirm,
+          activeSeat,
           onStatus: () => setPhase("thinking"),
           onToken: (t) => {
             appendLiveText(t);
             finalAnswer += t;
-            if (t && !t.startsWith(">")) setPhase("acting");
+            if (t && !t.trimStart().startsWith(">")) setPhase("acting");
+            // 流式过程中一旦出现完整首句，立刻合成，与后续生成并行
+            if (ttsEnabled && !earlyTtsStarted) {
+              const partial = extractAnswer(finalAnswer);
+              if (/[。！？!?]/.test(partial) && pickSpeakText(partial).length >= 6) {
+                startTts(partial);
+              }
+            }
           },
           onTrace: (step) => {
             collectedSteps.push(step);
             addLiveStep(step);
             if (step.type === "tool" || step.type === "loop") setPhase("acting");
           },
-          onConfirm: (data) => {
-            setConfirm(data);
+          onConfirm: () => {
+            // Agent 确认只走对话（文本/语音回「确认」「取消」），不弹窗
+            setConfirm(null);
             setPhase("idle");
           },
-          onContext: (items) => setContexts(items),
+          onActiveSeat: (data) => {
+            if (isSeatId(data?.active_seat)) setActiveSeat(data.active_seat);
+          },
+          onContext: (items) => {
+            collectedContexts = normalizeContexts(items);
+            setContexts(collectedContexts);
+          },
           onFinal: async (data) => {
-            const answer = finalAnswer.trim() || "已完成。";
+            const seatFromState = (data as { state?: { active_seat?: string } })?.state?.active_seat;
+            const seat = (data as { active_seat?: string }).active_seat || seatFromState;
+            if (isSeatId(seat)) setActiveSeat(seat);
+            const fromFinal = normalizeContexts(
+              (data as { contexts?: unknown }).contexts ?? collectedContexts,
+            );
+            const answer = extractAnswer(finalAnswer) || "好的，我这边处理好了。";
             pushMessage({
               id: uid(),
               role: "assistant",
@@ -136,19 +224,13 @@ export function CabinRuntimeProvider({ children }: { children: ReactNode }) {
               relatedImages: (
                 data as { related_images?: { image_path: string; title?: string }[] }
               ).related_images,
+              contexts: fromFinal,
             });
             resetLive();
-            await refreshState();
 
-            const spoken = answer
-              .split(/\n+/)
-              .filter((line) => line.trim() && !line.trim().startsWith(">"))
-              .slice(-3)
-              .join(" ");
-            if (spoken && confirm == null && ttsEnabled) {
-              setPhase("speaking");
-              await speakText(spoken);
-            }
+            // 未抢跑则立刻播报；与车况刷新并行，避免等状态接口拖慢出声
+            if (!earlyTtsStarted) startTts(answer);
+            await Promise.all([refreshState(), ttsPromise ?? Promise.resolve()]);
             setPhase("idle");
           },
           onError: (msg) => setError(msg),
@@ -161,6 +243,7 @@ export function CabinRuntimeProvider({ children }: { children: ReactNode }) {
       }
     },
     [
+      activeSeat,
       addLiveStep,
       appendLiveText,
       busy,
@@ -169,81 +252,147 @@ export function CabinRuntimeProvider({ children }: { children: ReactNode }) {
       refreshState,
       resetLive,
       sessionId,
+      setActiveSeat,
       setBusy,
       setConfirm,
       setContexts,
       setError,
       setPhase,
       ttsEnabled,
+      ttsVolume,
     ],
   );
 
   const onSubmit = (e: FormEvent) => {
     e.preventDefault();
+    void unlockAudioPlayback();
     const q = draft;
     setDraft("");
     void runQuery(q);
   };
 
   const onHoldStart = () => {
-    if (busy) return;
-    const rec = getSpeechRecognition();
-    if (!rec) {
-      setError("当前浏览器不支持语音识别，请用 Chrome 并允许麦克风");
-      return;
-    }
+    if (busy || recognizingRef.current) return;
+    holdActiveRef.current = true;
     stopSpeaking();
-    transcriptRef.current = "";
-    recognizingRef.current = true;
+    setError(null);
     setPhase("listening");
-    rec.lang = "zh-CN";
-    rec.continuous = true;
-    rec.interimResults = true;
-    rec.onresult = (ev) => {
-      let text = "";
-      for (let i = 0; i < ev.results.length; i++) {
-        text += ev.results[i][0].transcript;
+    setDraft("正在聆听…");
+    void (async () => {
+      try {
+        await unlockAudioPlayback();
+        const mic = await startMicRecording();
+        if (!holdActiveRef.current) {
+          mic.abort();
+          return;
+        }
+        micRef.current = mic;
+        recognizingRef.current = true;
+      } catch (e) {
+        holdActiveRef.current = false;
+        recognizingRef.current = false;
+        setDraft("");
+        setError(e instanceof Error ? e.message : "无法启动麦克风");
+        setPhase("idle");
       }
-      transcriptRef.current = text;
-      setDraft(text);
-    };
-    rec.onerror = () => {
-      recognizingRef.current = false;
-      setPhase("idle");
-    };
-    rec.onend = () => {
-      recognizingRef.current = false;
-    };
-    try {
-      rec.start();
-      (window as unknown as { __cabinRec?: typeof rec }).__cabinRec = rec;
-    } catch {
-      setError("无法启动麦克风");
-      setPhase("idle");
-    }
+    })();
   };
 
   const onHoldEnd = () => {
-    const rec = (window as unknown as { __cabinRec?: ReturnType<typeof getSpeechRecognition> })
-      .__cabinRec;
-    try {
-      rec?.stop();
-    } catch {
-      /* ignore */
-    }
-    const text = transcriptRef.current.trim() || draft.trim();
-    setPhase("idle");
-    if (text) {
+    holdActiveRef.current = false;
+    const mic = micRef.current;
+    micRef.current = null;
+    if (!mic) {
+      // 松手太快，录音还没起来
       setDraft("");
-      void runQuery(text);
+      setPhase("idle");
+      return;
     }
+    void (async () => {
+      recognizingRef.current = false;
+      setPhase("thinking");
+      setDraft("正在识别…");
+      try {
+        const blob = await mic.stop();
+        if (!blob.size) {
+          setDraft("");
+          setPhase("idle");
+          setError("没听清，请再试一次");
+          return;
+        }
+        const text = await recognizeBlob(blob);
+        if (!text) {
+          setDraft("");
+          setPhase("idle");
+          setError("没听清，请再说一次");
+          return;
+        }
+        setDraft("");
+        await runQuery(text);
+      } catch (e) {
+        setDraft("");
+        setPhase("idle");
+        setError(e instanceof Error ? e.message : "语音识别失败");
+      }
+    })();
   };
 
   const doReset = useCallback(async () => {
-    await resetCabin(sessionId);
-    clearChat();
+    stopSpeaking();
+    const store = useCabinStore.getState();
+    store.setResetInFlight(true);
+    store.bumpVehicleEpoch();
+    try {
+      const res = await resetCabin(sessionId);
+      clearChat();
+      if (res?.state) setVehicle(res.state as CabinStateSnapshot);
+      store.bumpVehicleEpoch();
+      store.bumpMapEpoch();
+    } finally {
+      useCabinStore.getState().setResetInFlight(false);
+    }
+    // 放行后再拉一次，确认与后端一致（此时 tick 已恢复）
     await refreshState();
-  }, [clearChat, refreshState, sessionId]);
+  }, [clearChat, refreshState, sessionId, setVehicle]);
+
+  const switchSession = useCallback(
+    async (nextId: string, title?: string) => {
+      stopSpeaking();
+      useCabinStore.getState().bumpVehicleEpoch();
+      setSessionId(nextId, title);
+      clearChat();
+      resetLive();
+      setError(null);
+      setPhase("idle");
+      try {
+        const data = await fetchSessionMessages(nextId, 300);
+        setMessages(transcriptToChat(data.messages || []));
+        useCabinStore.getState().setSessionTitle(data.title || title || nextId);
+        const state = await fetchCabinState(nextId);
+        setVehicle(state.state);
+        useCabinStore.getState().bumpMapEpoch();
+        setAgentMeta(state.agent ?? null);
+        if (state.pending) {
+          setConfirm(null);
+        } else {
+          setConfirm(null);
+        }
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "切换会话失败");
+      }
+    },
+    [
+      clearChat,
+      resetLive,
+      setAgentMeta,
+      setConfirm,
+      setError,
+      setMessages,
+      setPhase,
+      setSessionId,
+      setVehicle,
+    ],
+  );
 
   const value = useMemo(
     () => ({
@@ -255,8 +404,10 @@ export function CabinRuntimeProvider({ children }: { children: ReactNode }) {
       onHoldEnd,
       refreshState,
       doReset,
+      switchSession,
+      reloadMessages,
     }),
-    [draft, doReset, onHoldEnd, onHoldStart, onSubmit, refreshState, runQuery],
+    [draft, doReset, onHoldEnd, onHoldStart, onSubmit, refreshState, reloadMessages, runQuery, switchSession],
   );
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;

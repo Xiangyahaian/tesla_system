@@ -39,7 +39,7 @@ export function GlobalComposer() {
         onClick={() => setOpen(true)}
         title="Ctrl/Cmd+K"
       >
-        Ask
+        提问
         <span className="fab-kbd">⌘K</span>
       </button>
     );
@@ -49,14 +49,14 @@ export function GlobalComposer() {
     <div className="global-composer-overlay" role="dialog" aria-label="全局指令">
       <form className="global-composer" onSubmit={submit}>
         <div className="global-composer-head">
-          <span>指令</span>
+          <span>对小特说</span>
           <span className="global-composer-phase">{phase}</span>
         </div>
         <input
           autoFocus
           value={text}
           onChange={(e) => setText(e.target.value)}
-          placeholder="对小特说一句话…"
+          placeholder="输入一句指令…"
         />
         <div className="global-composer-actions">
           <button type="button" className="btn ghost compact" onClick={() => setOpen(false)}>

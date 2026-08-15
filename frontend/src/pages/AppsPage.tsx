@@ -45,7 +45,7 @@ export function AppsPage() {
 
   return (
     <div className="page-apps">
-      <TopBar title="Apps" subtitle="模拟车机应用目录 · App Gateway" />
+      <TopBar title="车机应用" subtitle="点击应用将通过语音助手打开或关闭" />
       <div className="apps-body">
         <div className="apps-toolbar">
           <button
@@ -89,7 +89,7 @@ export function AppsPage() {
             );
           })}
         </div>
-        <p className="apps-note">点击应用会走 StructuredNLU → apps.launch，右侧 HUD 与状态条同步前台 App。</p>
+        <p className="apps-note">点击应用会交给助手执行打开/关闭，驾驶页右侧中控会同步前台应用。</p>
       </div>
     </div>
   );

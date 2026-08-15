@@ -13,7 +13,8 @@ export default defineConfig({
     proxy: {
       "/api": "http://127.0.0.1:6006",
       "/manual": "http://127.0.0.1:6006",
-      "/agent": "http://127.0.0.1:6006",
+      "/legacy": "http://127.0.0.1:6006",
+      "/agent-console": "http://127.0.0.1:6006",
     },
   },
   build: {

@@ -68,6 +68,30 @@ class RagService:
         self._ensure()
         return self._engine.build_context(docs)
 
+    def build_context_cards(self, docs: List) -> Tuple[str, List[Dict[str, Any]]]:
+        """结构化检索卡片，供前端展开阅读。"""
+        self._ensure()
+        context_str, _ = self._engine.build_context(docs)
+        cards: List[Dict[str, Any]] = []
+        for idx, doc in enumerate(docs):
+            meta = getattr(doc, "metadata", None) or {}
+            if not isinstance(meta, dict):
+                meta = {}
+            content = (getattr(doc, "page_content", None) or "").strip()
+            page = meta.get("page_number") or meta.get("page") or meta.get("page_id")
+            title = meta.get("title") or meta.get("section") or meta.get("header") or f"手册片段 {idx + 1}"
+            preview = " ".join(content.split())[:140]
+            cards.append(
+                {
+                    "index": idx + 1,
+                    "title": str(title),
+                    "page": page,
+                    "content": content,
+                    "preview": preview + ("…" if len(preview) >= 140 else ""),
+                }
+            )
+        return context_str, cards
+
     def post_process(self, response: str, docs: List) -> Dict[str, Any]:
         self._ensure()
         return self._engine.post_process(response, docs)

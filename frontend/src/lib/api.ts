@@ -24,7 +24,49 @@ export async function resetCabin(sessionId = "default") {
     method: "POST",
   });
   if (!res.ok) throw new Error(`reset ${res.status}`);
-  return res.json();
+  return res.json() as Promise<{
+    success: boolean;
+    message: string;
+    state: CabinStateSnapshot;
+  }>;
+}
+
+export async function executeControl(
+  tool: string,
+  arguments_: Record<string, unknown> = {},
+  sessionId = "default",
+) {
+  const res = await fetch("/api/control", {
+    method: "POST",
+    headers: jsonHeaders,
+    body: JSON.stringify({
+      tool,
+      arguments: arguments_,
+      session_id: sessionId,
+    }),
+  });
+  if (!res.ok) throw new Error(`control ${res.status}`);
+  return res.json() as Promise<{
+    ok: boolean;
+    message: string;
+    data?: Record<string, unknown>;
+    tool: string;
+    state: CabinStateSnapshot;
+    error?: string;
+  }>;
+}
+
+export async function tickDynamics(sessionId = "default", dt = 0.25) {
+  const res = await fetch(
+    `/api/dynamics/tick?session_id=${encodeURIComponent(sessionId)}&dt=${dt}`,
+    { method: "POST" },
+  );
+  if (!res.ok) throw new Error(`tick ${res.status}`);
+  return res.json() as Promise<{
+    ok: boolean;
+    state: CabinStateSnapshot;
+    data?: Record<string, unknown>;
+  }>;
 }
 
 export async function fetchApps() {
@@ -52,10 +94,188 @@ export async function fetchTools() {
   }>;
 }
 
+export async function fetchAmapConfig() {
+  const res = await fetch("/api/maps/config");
+  if (!res.ok) throw new Error(`maps config ${res.status}`);
+  return res.json() as Promise<{
+    ok: boolean;
+    provider: string;
+    configured: boolean;
+    js_key: string;
+    security_code: string;
+    origin: { name: string; lng: number; lat: number; location: string; address?: string };
+  }>;
+}
+
 export async function fetchModelStatus() {
   const res = await fetch("/api/model-status");
   if (!res.ok) throw new Error(`model-status ${res.status}`);
   return res.json() as Promise<Record<string, unknown>>;
+}
+
+export type SessionSummary = {
+  session_id: string;
+  title: string;
+  created_at?: number;
+  updated_at?: number;
+  last_active?: number;
+  status?: string;
+  message_count?: number;
+  turn_count?: number;
+  transcript_chars?: number;
+  preview?: string;
+  has_vehicle?: boolean;
+  has_transcript?: boolean;
+};
+
+export async function loginUser(nickname: string) {
+  const res = await fetch("/api/users/login", {
+    method: "POST",
+    headers: jsonHeaders,
+    body: JSON.stringify({ nickname }),
+  });
+  const data = (await res.json()) as {
+    ok?: boolean;
+    error?: string;
+    nickname?: string;
+    session_id?: string;
+    title?: string;
+    users?: UserSummary[];
+  };
+  if (!res.ok || !data.ok || !data.session_id) {
+    throw new Error(data.error || `login ${res.status}`);
+  }
+  return data as {
+    ok: true;
+    nickname: string;
+    session_id: string;
+    title: string;
+    users: UserSummary[];
+  };
+}
+
+export async function fetchUsers() {
+  const res = await fetch("/api/users");
+  if (!res.ok) throw new Error(`users ${res.status}`);
+  return res.json() as Promise<{ ok: boolean; users: UserSummary[] }>;
+}
+
+export type UserSummary = {
+  id?: string;
+  session_id: string;
+  nickname: string;
+  title?: string;
+  created_at?: number | null;
+  last_login_at?: number | null;
+  login_count?: number;
+  updated_at?: number | string | null;
+};
+
+export async function fetchSessions() {
+  const res = await fetch("/api/sessions");
+  if (!res.ok) throw new Error(`sessions ${res.status}`);
+  return res.json() as Promise<{ ok: boolean; sessions: SessionSummary[] }>;
+}
+
+export async function createSession(title?: string) {
+  const res = await fetch("/api/sessions", {
+    method: "POST",
+    headers: jsonHeaders,
+    body: JSON.stringify({ title }),
+  });
+  if (!res.ok) throw new Error(`create session ${res.status}`);
+  return res.json() as Promise<{
+    ok: boolean;
+    session_id: string;
+    title: string;
+    sessions: SessionSummary[];
+  }>;
+}
+
+export async function renameSession(sessionId: string, title: string) {
+  const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+    method: "PATCH",
+    headers: jsonHeaders,
+    body: JSON.stringify({ title }),
+  });
+  if (!res.ok) throw new Error(`rename session ${res.status}`);
+  return res.json() as Promise<{ ok: boolean; session_id: string; title: string; sessions: SessionSummary[] }>;
+}
+
+export async function deleteSession(sessionId: string) {
+  const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`, { method: "DELETE" });
+  const data = (await res.json()) as { ok?: boolean; error?: string; sessions?: SessionSummary[] };
+  if (!res.ok || !data.ok) throw new Error(data.error || `delete session ${res.status}`);
+  return data as { ok: true; session_id: string; sessions: SessionSummary[] };
+}
+
+export async function purgeAllSessions() {
+  const res = await fetch("/api/sessions/purge", { method: "POST" });
+  const data = (await res.json()) as {
+    ok?: boolean;
+    error?: string;
+    count?: number;
+    deleted?: string[];
+    sessions?: SessionSummary[];
+  };
+  if (!res.ok || !data.ok) throw new Error(data.error || `purge sessions ${res.status}`);
+  return data as {
+    ok: true;
+    count: number;
+    deleted: string[];
+    sessions: SessionSummary[];
+  };
+}
+
+export async function fetchSessionMessages(sessionId = "default", limit = 200) {
+  const res = await fetch(
+    `/api/sessions/${encodeURIComponent(sessionId)}/messages?limit=${limit}`,
+  );
+  if (!res.ok) throw new Error(`session messages ${res.status}`);
+  return res.json() as Promise<{
+    ok: boolean;
+    session_id: string;
+    title: string;
+    total: number;
+    messages: { role: string; content: string; ts?: number; meta?: Record<string, unknown> }[];
+  }>;
+}
+
+export async function transcribeAudio(file: Blob | File) {
+  const form = new FormData();
+  form.append("audio", file, file instanceof File ? file.name : "voice.webm");
+  const res = await fetch("/api/asr", { method: "POST", body: form });
+  const data = (await res.json()) as { ok?: boolean; text?: string; error?: string; model?: string };
+  if (!res.ok || !data.ok) throw new Error(data.error || `asr ${res.status}`);
+  return data as { ok: true; text: string; model?: string };
+}
+
+export async function synthesizeSpeech(text: string, voice?: string, emotion?: string) {
+  const res = await fetch("/api/tts", {
+    method: "POST",
+    headers: jsonHeaders,
+    body: JSON.stringify({ text, voice, emotion }),
+  });
+  const data = (await res.json()) as {
+    ok?: boolean;
+    audio_base64?: string;
+    mime?: string;
+    error?: string;
+    model?: string;
+    voice?: string;
+    emotion?: string;
+  };
+  if (!res.ok || !data.ok || !data.audio_base64) {
+    throw new Error(data.error || `tts ${res.status}`);
+  }
+  return data as {
+    ok: true;
+    audio_base64: string;
+    mime: string;
+    model?: string;
+    voice?: string;
+    emotion?: string;
+  };
 }
 
 export async function fetchAgentHistory(sessionId = "default", limit = 40) {
@@ -107,9 +327,11 @@ export type AgentTurnSummary = {
   query?: string;
   user_query?: string;
   answer_preview?: string;
+  intent?: string;
   status?: string;
   steps?: TraceStep[];
   step_count?: number;
+  tool_names?: string[];
 };
 
 export type StreamHandlers = {
@@ -117,11 +339,13 @@ export type StreamHandlers = {
   onTrace?: (step: TraceStep) => void;
   onIntent?: (data: Record<string, unknown>) => void;
   onConfirm?: (data: ConfirmPayload) => void;
-  onContext?: (items: string[]) => void;
+  onContext?: (items: unknown) => void;
   onTurn?: (data: Record<string, unknown>) => void;
   onFinal?: (data: Record<string, unknown>) => void;
   onStatus?: (text: string) => void;
   onError?: (message: string) => void;
+  onActiveSeat?: (data: { active_seat?: string; active_seat_cn?: string; source?: string }) => void;
+  onMemory?: (data: Record<string, unknown>) => void;
 };
 
 export async function streamChat(
@@ -130,6 +354,7 @@ export async function streamChat(
     sessionId?: string;
     model?: string;
     confirm?: boolean | null;
+    activeSeat?: string;
     signal?: AbortSignal;
   } & StreamHandlers,
 ) {
@@ -142,6 +367,7 @@ export async function streamChat(
       session_id: opts.sessionId ?? "default",
       model: opts.model ?? "remote",
       confirm: opts.confirm ?? null,
+      active_seat: opts.activeSeat ?? "front_left",
     }),
   });
   if (!res.ok || !res.body) throw new Error(`chat ${res.status}`);
@@ -178,7 +404,7 @@ export async function streamChat(
           opts.onConfirm?.(payload.data as ConfirmPayload);
           break;
         case "context":
-          opts.onContext?.(payload.data as string[]);
+          opts.onContext?.(payload.data);
           break;
         case "turn":
           opts.onTurn?.(payload.data as Record<string, unknown>);
@@ -188,6 +414,12 @@ export async function streamChat(
           break;
         case "status":
           opts.onStatus?.(String(payload.data ?? ""));
+          break;
+        case "active_seat":
+          opts.onActiveSeat?.(payload.data as { active_seat?: string; active_seat_cn?: string; source?: string });
+          break;
+        case "memory":
+          opts.onMemory?.(payload.data as Record<string, unknown>);
           break;
         case "error":
           opts.onError?.(String(payload.data ?? "error"));
