@@ -470,7 +470,10 @@ async def asr_endpoint(request: Request):
         fmt = "mp3"
     elif "ogg" in content_type:
         fmt = "ogg"
-    elif "mp4" in content_type or "m4a" in content_type:
+    elif "mp4" in content_type or "m4a" in content_type or "aac" in content_type:
+        fmt = "mp4"
+    # Safari 常上传 .mp4 / .m4a
+    if fmt in ("m4a", "aac", "caf"):
         fmt = "mp4"
 
     try:
@@ -520,7 +523,7 @@ async def tts_endpoint(request: Request):
 
 @app.post("/api/tts/stream")
 async def tts_stream_endpoint(request: Request):
-    """SSE 流式 TTS：首包更快，前端可边下边播。"""
+    """SSE 流式 TTS：默认 PCM 首包可播，前端边下边播。"""
     try:
         body = await request.json()
     except Exception:
@@ -532,14 +535,25 @@ async def tts_stream_endpoint(request: Request):
 
     voice = (body or {}).get("voice") or None
     emotion = (body or {}).get("emotion") or None
+    fmt = str((body or {}).get("format") or "pcm").strip().lower() or "pcm"
+    if fmt not in ("pcm", "mp3", "wav"):
+        fmt = "pcm"
 
     from app.speech import iter_synthesize_stream
 
     def event_gen():
-        for ev in iter_synthesize_stream(text, voice=voice, emotion=emotion):
+        for ev in iter_synthesize_stream(text, voice=voice, emotion=emotion, format=fmt):
             yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
 
-    return StreamingResponse(event_gen(), media_type="text/event-stream")
+    return StreamingResponse(
+        event_gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
 
 
 

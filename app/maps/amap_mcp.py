@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -247,13 +248,72 @@ class PlaceAmbiguousError(Exception):
         super().__init__(f"目的地「{query}」有多处匹配")
 
 
+def _normalize_place_query(name: str) -> str:
+    """纠正常见口误，便于检索。"""
+    q = (name or "").strip()
+    q = q.replace("冰壶管", "冰壶馆").replace("冰球管", "冰球馆")
+    q = q.replace("游泳管", "游泳馆").replace("图书管", "图书馆")
+    return q
+
+
+def _poi_relevance_score(query: str, poi: Dict[str, Any]) -> float:
+    """目的地与 POI 的相关度；用于多结果时丢掉牛肉面这类无关项。"""
+    q = _normalize_place_query(query)
+    name = str(poi.get("name") or "")
+    addr = str(poi.get("address") or "")
+    blob = f"{name} {addr}"
+    if not q or not name:
+        return -1.0
+    score = 0.0
+    if name == q:
+        score += 200
+    if q in name:
+        score += 100
+    if q in blob:
+        score += 40
+    # 二字片段重合
+    for i in range(max(0, len(q) - 1)):
+        bg = q[i : i + 2]
+        if not bg.strip():
+            continue
+        if bg in name:
+            score += 12
+        elif bg in addr:
+            score += 4
+    # 场馆类查询：打压餐饮店
+    if re.search(r"(馆|场|中心|大厦|广场|园|寺|站|机场)", q) and re.search(
+        r"(面|粉|饭|火锅|烧烤|餐饮|餐厅|饭店|咖啡|奶茶|小吃|超市|便利)", name
+    ):
+        score -= 80
+    # 名称几乎不沾边
+    shared = sum(1 for ch in set(q) if ch in name and "\u4e00" <= ch <= "\u9fff")
+    if shared <= 1 and q not in name:
+        score -= 30
+    return score
+
+
+def _filter_relevant_pois(query: str, pois: List[Dict[str, Any]], limit: int = 4) -> List[Dict[str, Any]]:
+    """按相关度筛候选；筛完只剩 1 个则视为可直接用。"""
+    if not pois:
+        return []
+    scored = [(_poi_relevance_score(query, p), p) for p in pois if isinstance(p, dict)]
+    scored.sort(key=lambda x: -x[0])
+    kept = [p for s, p in scored if s >= 20][:limit]
+    if not kept:
+        kept = [p for s, p in scored if s >= 8][:limit]
+    if not kept:
+        # 仍无可靠项：最多保留分数最高的 2 个，避免乱塞餐饮
+        kept = [p for s, p in scored if s > 0][: min(2, limit)]
+    return kept
+
+
 def lookup_destination(name: str, city: str = "北京", limit: int = 4) -> Dict[str, Any]:
     """解析导航目的地：唯一则 ok；多处则 ambiguous（交给 Agent 反问）。"""
-    name = (name or "").strip()
+    name = _normalize_place_query(name)
     if not name:
         return {"status": "not_found", "query": name, "candidates": []}
 
-    pois = _dedupe_pois(_rest_place_text(name, city=city, offset=10))
+    pois = _filter_relevant_pois(name, _dedupe_pois(_rest_place_text(name, city=city, offset=10)), limit=max(limit, 6))
     exact = [p for p in pois if p.get("name") == name]
     if exact:
         return {"status": "ok", "place": exact[0], "candidates": exact[:1], "query": name}
@@ -302,7 +362,7 @@ def lookup_destination(name: str, city: str = "北京", limit: int = 4) -> Dict[
                 expanded.append(
                     {"name": cand, "address": p.get("address") or "", "location": p["location"]}
                 )
-        expanded = _dedupe_pois(expanded)
+        expanded = _filter_relevant_pois(name, _dedupe_pois(expanded), limit=max(limit, 6))
         containing = [p for p in expanded if name in str(p.get("name") or "")]
         pool = containing or expanded
         if len(pool) >= 2 and not any(p.get("name") == name for p in pool):

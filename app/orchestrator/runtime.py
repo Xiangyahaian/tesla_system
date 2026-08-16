@@ -234,9 +234,17 @@ class Orchestrator:
                         status="ok" if result.success else "error",
                     )
                     # 过程/依据面板用 trace；工具原文绝不进对话流
-                    if call.name in {"notifications.list_messages", "maps.search_nearby"}:
+                    if call.name in {
+                        "notifications.list_messages",
+                        "maps.search_nearby",
+                        "navigation.navigate_to",
+                        "navigation.start",
+                    }:
                         continue
-                    yield from self._emit_text(f"> `{call.name}` → {result.message}\n")
+                    # 多行结果每一行都加 >，避免漏进对话框
+                    dump = (result.message or "").strip() or "(无输出)"
+                    for line in dump.splitlines() or ["(无输出)"]:
+                        yield from self._emit_text(f"> `{call.name}` → {line}\n")
                 if message_contexts:
                     yield StreamEvent("context", message_contexts)
                     yield from self._trace(
@@ -962,7 +970,11 @@ class Orchestrator:
                     continue
             if re.search(r"想去哪家[，,]?跟我说导航", line):
                 continue
-            if re.search(r"(依据面板|过程面板|检索成功|口语候选|勿念)", line):
+            if re.search(r"用户也可以直接说|完整店名|第几个", line):
+                continue
+            if re.search(r"(依据面板|过程面板|检索成功|口语候选|勿念|尚未开始导航|不要擅自)", line):
+                continue
+            if re.search(r"请用口语列出|禁止编造|不要增加未列出", line):
                 continue
             lines.append(line)
         out = "\n".join(lines)
@@ -1013,16 +1025,16 @@ class Orchestrator:
             k = self._poi_recommend_count(query, len(pois))
             names = [str(p.get("name") or "").strip() for p in pois[:k] if p.get("name")]
             if not names:
-                return "附近这会儿没搜到合适的，换个词我再帮你找。"
+                return "【听】附近这会儿没搜到合适的，换个词我再帮你找。"
             if len(names) == 1:
-                return f"附近有一家{names[0]}，要导航过去吗？"
+                return f"【听】附近有一家{names[0]}，要导航过去吗？"
             if len(names) == 2:
-                return f"附近可以看看{names[0]}和{names[1]}，想去哪家跟我说一声。"
+                return f"【听】附近可以看看{names[0]}和{names[1]}，想去哪家跟我说一声。"
             return (
-                f"附近有不少选择，像{names[0]}、{names[1]}和{names[2]}都在这附近。"
+                f"【听】附近有不少选择，像{names[0]}、{names[1]}和{names[2]}都在这附近。"
                 "想直接导航，还是有口味偏好？"
             )
-        return "附近这会儿没搜到合适的。"
+        return "【听】附近这会儿没搜到合适的。"
 
     def _nearby_context_cards(self, results: List[ToolResult]) -> List[Dict[str, Any]]:
         """周边 POI → 与手册 RAG 同结构的依据卡片，供过程面板展开。"""
@@ -1185,6 +1197,28 @@ class Orchestrator:
         # 兼容旧调用点：直接返回口语摘要（无正文）
         return self._messages_spoken_summary(results)
 
+    def _nav_clarify_spoken(self, results: List[ToolResult]) -> Optional[str]:
+        """目的地歧义：直接生成用户口语，不经 LLM，避免开发者指令/无关店名泄漏。"""
+        for r in results:
+            if (r.tool or "") not in {"navigation.navigate_to", "navigation.start"}:
+                continue
+            if not isinstance(r.data, dict) or not r.data.get("need_clarify"):
+                continue
+            cands = [c for c in (r.data.get("candidates") or []) if isinstance(c, dict) and c.get("name")]
+            if not cands:
+                continue
+            q = str(r.data.get("query") or "那里").strip() or "那里"
+            names = [str(c.get("name")).strip() for c in cands[:4] if str(c.get("name") or "").strip()]
+            if not names:
+                continue
+            if len(names) == 1:
+                return f"找到了{names[0]}，要我现在带你过去吗？"
+            if len(names) == 2:
+                return f"「{q}」有两处，一个是{names[0]}，一个是{names[1]}。你想去哪个？"
+            mid = "、".join(names[:-1])
+            return f"「{q}」有好几处，分别是{mid}，还有{names[-1]}。你想去哪一个？"
+        return None
+
     def _nav_clarify_payload(self, results: List[ToolResult]) -> Optional[str]:
         for r in results:
             if (r.tool or "") not in {"navigation.navigate_to", "navigation.start"}:
@@ -1203,9 +1237,8 @@ class Orchestrator:
                     + (f"（{addr}）" if addr else "")
                 )
             return (
-                f"目的地「{q}」有多处，还没开导航。请口语列出选项并反问用户选哪一个：\n"
+                f"目的地「{q}」有多处，还没开导航。候选人选：\n"
                 + "\n".join(lines)
-                + "\n不要擅自导航，不要增加未列出的地点。"
             )
         return None
 
@@ -1239,21 +1272,14 @@ class Orchestrator:
                         temperature=0.35,
                     )
                     text = self._strip_oral_reply((text or "").strip())
+                    if text and "【听】" not in text:
+                        text = f"【听】{text}"
                     return text or self._nearby_spoken_fallback(query, results)
                 except Exception:
                     return self._nearby_spoken_fallback(query, results)
-            clarify = self._nav_clarify_payload(results)
-            if clarify:
-                try:
-                    text = llm.chat(
-                        TOOL_WRAP_STYLE,
-                        f"用户原话：{query}\n工具执行结果（只能转述其中真实出现的选项，禁止新增，禁止 markdown）：\n{clarify}",
-                        temperature=0.35,
-                    )
-                    text = self._strip_oral_reply((text or "").strip())
-                    return text or "目的地有好几处，你想去哪一个？"
-                except Exception:
-                    return "目的地有好几处，你想去哪一个？"
+            clarify_spoken = self._nav_clarify_spoken(results)
+            if clarify_spoken:
+                return self._strip_oral_reply(f"【听】{clarify_spoken}")
             if all(not r.success for r in results):
                 return self._strip_oral_reply(tool_msg)
         try:
@@ -1263,9 +1289,11 @@ class Orchestrator:
                 temperature=0.35,
             )
             text = self._strip_oral_reply((text or "").strip())
-            return text or "好，我这边处理好了。"
+            if text and "【听】" not in text:
+                text = f"【听】{text}"
+            return text or "【听】好，我这边处理好了。"
         except Exception:
-            return "好，我这边处理好了。"
+            return "【听】好，我这边处理好了。"
 
     def _handle_search(
         self,

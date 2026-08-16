@@ -1,7 +1,14 @@
-/** 对话框只留口语：去掉轨迹、名单、markdown */
+/** 对话框展示 vs 语音播报：Agent 可用【听】【看】控制念什么 */
+
+/** 去掉轨迹/名单后的屏幕展示文案（保留步骤与小提示，去掉控制标记） */
 export function extractAnswer(raw: string): string {
   if (!raw) return "";
-  const cleaned = raw.replace(/\*\*/g, "").replace(/__/g, "").replace(/`/g, "");
+  let cleaned = raw.replace(/\*\*/g, "").replace(/__/g, "").replace(/`/g, "");
+  // 控制标记只影响语音，屏幕上仍展示其内容
+  cleaned = cleaned.replace(/【听】/g, "").replace(/【看】/g, "\n");
+  cleaned = cleaned.replace(/\[\[说\]\]/g, "").replace(/\[\[\/说\]\]/g, "");
+  cleaned = cleaned.replace(/\[\[看\]\]/g, "\n").replace(/\[\[\/看\]\]/g, "");
+
   const lines = cleaned.split(/\r?\n/);
   const out: string[] = [];
   let started = false;
@@ -13,7 +20,8 @@ export function extractAnswer(raw: string): string {
     if (/^消息如下[:：]/.test(t)) continue;
     if (/^(微信|短信|邮件|钉钉|企业微信|QQ|iMessage)\s*[·•.\-]\s*.+[:：]/.test(t)) continue;
     if (/想去哪家[，,]?跟我说导航/.test(t)) continue;
-    if (/(依据面板|过程面板|检索成功|口语候选)/.test(t)) continue;
+    if (/用户也可以直接说|完整店名|第几个/.test(t)) continue;
+    if (/(依据面板|过程面板|检索成功|口语候选|尚未开始导航|不要擅自)/.test(t)) continue;
     if (/^\d+[\.、)]\s*\S+/.test(t) && /(米|路|街|号)/.test(t)) continue;
     if (t.includes(" · ") && /(路|街|号|店|米)/.test(t) && !/[吗呢吧啊噢哦～]$/.test(t)) continue;
     if (!t && !started) continue;
@@ -21,6 +29,56 @@ export function extractAnswer(raw: string): string {
     out.push(line.replace(/\*\*/g, ""));
   }
   return out.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+function cleanSpeakChunk(text: string): string {
+  return text
+    .replace(/^>.*$/gm, "")
+    .replace(/【\d+(?:\s*[,，、]\s*\d+)*】/g, "")
+    .replace(/^参考[:：].*$/gm, "")
+    .replace(/^小提示[:：].*$/gm, "")
+    .replace(/[#*`_]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
+ * Agent 控制的播报文本：优先【听】…【看】之间（或到文末）。
+ * 无标记时：只念结论口语，跳过小提示/参考/冗长步骤列表。
+ */
+export function extractSpeakText(raw: string): string {
+  if (!raw) return "";
+  const cleaned = raw.replace(/\*\*/g, "").replace(/__/g, "").replace(/`/g, "");
+
+  const tagged =
+    cleaned.match(/【听】([\s\S]*?)(?=【看】|$)/)?.[1] ??
+    cleaned.match(/\[\[说\]\]([\s\S]*?)\[\[\/说\]\]/)?.[1] ??
+    null;
+  if (tagged != null) {
+    return cleanSpeakChunk(tagged).slice(0, 160);
+  }
+
+  // 无标记：从展示文案推导「该念的部分」
+  const display = extractAnswer(raw);
+  if (!display) return "";
+
+  const lines = display.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  const oral: string[] = [];
+  for (const line of lines) {
+    if (/^小提示[:：]/.test(line)) break;
+    if (/^参考[:：]/.test(line)) break;
+    if (/^注意[:：]/.test(line)) break;
+    // 步骤列表：只念结论，不念 1.2.3.（开车时听步骤不安全也嘈杂）
+    if (/^\d+[\.、)]\s+/.test(line)) break;
+    if (/^[-•]\s+/.test(line)) break;
+    oral.push(line);
+  }
+  if (!oral.length) {
+    // 全文都是步骤：只念第一条去编号
+    const first = lines[0]?.replace(/^\d+[\.、)]\s+/, "").replace(/^[-•]\s+/, "") || "";
+    return cleanSpeakChunk(first).slice(0, 120);
+  }
+  return cleanSpeakChunk(oral.join(" ")).slice(0, 160);
 }
 
 export type RetrievedDoc = {

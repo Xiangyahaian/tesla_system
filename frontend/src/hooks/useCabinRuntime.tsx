@@ -10,7 +10,7 @@ import {
   useState,
 } from "react";
 import { fetchCabinState, fetchSessionMessages, resetCabin, streamChat } from "@/lib/api";
-import { extractAnswer, normalizeContexts } from "@/lib/answer";
+import { extractAnswer, extractSpeakText, normalizeContexts } from "@/lib/answer";
 import { recognizeBlob, speakText, startMicRecording, stopSpeaking, unlockAudioPlayback, type MicRecorder } from "@/lib/speech";
 import { useCabinStore } from "@/store/cabinStore";
 import type { CabinStateSnapshot, ChatMessage, TraceStep } from "@/lib/types";
@@ -20,20 +20,12 @@ function uid() {
   return Math.random().toString(36).slice(2, 10);
 }
 
-/** 取首句短文本，尽早开 TTS 以降延迟 */
-function pickSpeakText(answer: string): string {
-  const flat = answer
-    .replace(/^>.*$/gm, "")
-    .replace(/【\d+(?:\s*[,，、]\s*\d+)*】/g, "")
-    .replace(/^参考[:：].*$/gm, "")
-    .replace(/\s+/g, " ")
-    .trim();
+/** 首句完整句读才抢跑，避免只播半截就停。 */
+function pickFirstSentence(answer: string): string {
+  const flat = (answer || "").replace(/\s+/g, " ").trim();
   if (!flat) return "";
-  // 更短触发：8–72 字遇到句读就开播
-  const m = flat.match(/^[\s\S]{8,72}?[。！？!?]/);
-  if (m) return m[0].trim();
-  if (flat.length >= 24) return flat.slice(0, 48);
-  return flat.slice(0, 72);
+  const m = flat.match(/^[\s\S]{4,100}?[。！？!?]/);
+  return m ? m[0].trim() : "";
 }
 
 function transcriptToChat(messages: { role: string; content: string; ts?: number }[]): ChatMessage[] {
@@ -158,16 +150,18 @@ export function CabinRuntimeProvider({ children }: { children: ReactNode }) {
       const collectedSteps: TraceStep[] = [];
       let collectedContexts = normalizeContexts([]);
       let earlyTtsStarted = false;
+      let spokenPrefix = "";
       let ttsPromise: Promise<void> | null = null;
 
-      const startTts = (text: string) => {
-        const spoken = pickSpeakText(text);
-        if (!spoken || !ttsEnabled || earlyTtsStarted) return;
-        earlyTtsStarted = true;
+      const enqueueSpeak = (text: string, interrupt: boolean) => {
+        const clean = (text || "").replace(/\s+/g, " ").trim();
+        if (!clean || !ttsEnabled) return;
         setPhase("speaking");
-        ttsPromise = speakText(spoken, ttsVolume).catch((e) => {
-          setError(e instanceof Error ? e.message : "语音播报失败");
-        });
+        const run = () =>
+          speakText(clean, ttsVolume, { interrupt }).catch((e) => {
+            setError(e instanceof Error ? e.message : "语音播报失败");
+          });
+        ttsPromise = ttsPromise ? ttsPromise.then(run, run) : run();
       };
 
       try {
@@ -181,11 +175,19 @@ export function CabinRuntimeProvider({ children }: { children: ReactNode }) {
             appendLiveText(t);
             finalAnswer += t;
             if (t && !t.trimStart().startsWith(">")) setPhase("acting");
-            // 流式过程中一旦出现完整首句，立刻合成，与后续生成并行
+            // 只抢跑 Agent 指定的【听】内容（或无标记时的可播结论）
             if (ttsEnabled && !earlyTtsStarted) {
-              const partial = extractAnswer(finalAnswer);
-              if (/[。！？!?]/.test(partial) && pickSpeakText(partial).length >= 6) {
-                startTts(partial);
+              const speakable = extractSpeakText(finalAnswer);
+              const first = pickFirstSentence(speakable);
+              // 有【听】标记时，等相对完整再播；无标记则等首句句读
+              const hasListenTag = /【听】|\[\[说\]\]/.test(finalAnswer);
+              const ready = hasListenTag
+                ? speakable.length >= 6 && (/[。！？!?]/.test(speakable) || /【看】/.test(finalAnswer))
+                : !!first;
+              if (ready && (first || speakable)) {
+                earlyTtsStarted = true;
+                spokenPrefix = first || speakable.slice(0, 100);
+                enqueueSpeak(spokenPrefix, true);
               }
             }
           },
@@ -214,6 +216,7 @@ export function CabinRuntimeProvider({ children }: { children: ReactNode }) {
               (data as { contexts?: unknown }).contexts ?? collectedContexts,
             );
             const answer = extractAnswer(finalAnswer) || "好的，我这边处理好了。";
+            const speakFull = extractSpeakText(finalAnswer) || answer;
             pushMessage({
               id: uid(),
               role: "assistant",
@@ -228,10 +231,25 @@ export function CabinRuntimeProvider({ children }: { children: ReactNode }) {
             });
             resetLive();
 
-            // 未抢跑则立刻播报；与车况刷新并行，避免等状态接口拖慢出声
-            if (!earlyTtsStarted) startTts(answer);
-            await Promise.all([refreshState(), ttsPromise ?? Promise.resolve()]);
-            setPhase("idle");
+            if (!earlyTtsStarted) {
+              enqueueSpeak(speakFull, true);
+            } else if (speakFull && spokenPrefix) {
+              let rest = "";
+              if (speakFull.startsWith(spokenPrefix)) {
+                rest = speakFull.slice(spokenPrefix.length).trim();
+              } else {
+                const idx = speakFull.indexOf(spokenPrefix);
+                rest = idx >= 0 ? speakFull.slice(idx + spokenPrefix.length).trim() : "";
+              }
+              if (rest.length >= 2) enqueueSpeak(rest, false);
+            }
+            void refreshState();
+            if (ttsPromise) {
+              setPhase("speaking");
+              void ttsPromise.finally(() => setPhase("idle"));
+            } else {
+              setPhase("idle");
+            }
           },
           onError: (msg) => setError(msg),
         });

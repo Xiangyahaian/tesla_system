@@ -34,7 +34,7 @@ def build_instruction(emotion: Optional[str] = None, *, scene: str = "闲聊对�
     return f"你说话的角色是温和客服，你说话的情感是{emo}。"
 
 
-def _clean_text(text: str, limit: int = 100) -> str:
+def _clean_text(text: str, limit: int = 160) -> str:
     clean = (text or "").strip()
     clean = re.sub(r"^>.*$", "", clean, flags=re.M)
     clean = re.sub(r"[#*`_]+", " ", clean)
@@ -233,6 +233,7 @@ def iter_synthesize_stream(
         "instruction": instruction,
         "format": format,
         "sample_rate": 24000,
+        "mime": "audio/pcm" if format == "pcm" else ("audio/mpeg" if format == "mp3" else f"audio/{format}"),
     }
 
     body = _tts_body(

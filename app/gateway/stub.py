@@ -845,6 +845,12 @@ class StubVehicleGateway(VehicleGateway):
         destination = (destination or "").strip()
         if not destination:
             return _fail("请告诉我目的地")
+        try:
+            from app.maps.amap_mcp import _normalize_place_query
+
+            destination = _normalize_place_query(destination)
+        except Exception:
+            pass
         from app.nlu.destination_guard import (
             is_relative_or_category_destination,
             relative_destination_block_message,
@@ -884,16 +890,18 @@ class StubVehicleGateway(VehicleGateway):
             cands = []
             for i, p in enumerate(e.candidates[:4], 1):
                 addr = (p.get("address") or "").strip()
-                bit = p.get("name") or destination
-                if addr:
-                    bit = f"{bit}（{addr}）"
-                cands.append({"index": i, "name": p.get("name"), "address": addr, "location": p.get("location")})
-            lines = [f"{c['index']}. {c['name']}" + (f" · {c['address']}" if c.get("address") else "") for c in cands]
+                cands.append(
+                    {
+                        "index": i,
+                        "name": p.get("name"),
+                        "address": addr,
+                        "location": p.get("location"),
+                    }
+                )
+            # 工具摘要只给内部/依据用，禁止写进用户口语的开发者指令
+            names = "、".join(str(c.get("name") or "") for c in cands if c.get("name"))
             return _ok(
-                f"目的地「{e.query}」有多处，尚未开始导航。"
-                f"请用口语列出下面选项并反问用户去哪一处（不要擅自开导航，不要编造未列出的地点）：\n"
-                + "\n".join(lines)
-                + "\n用户也可以直接说完整店名或「第几个」。",
+                f"目的地「{e.query}」有多处（{names}），需用户选定后再导航。",
                 {
                     "need_clarify": True,
                     "query": e.query,

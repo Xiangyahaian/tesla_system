@@ -45,12 +45,16 @@ export function VoiceOrb({
           type="button"
           className={`voice-orb ${phase}`}
           disabled={busy && phase === "thinking"}
+          style={{ touchAction: "none", userSelect: "none", WebkitUserSelect: "none" }}
+          onContextMenu={(e) => e.preventDefault()}
           onPointerDown={(e) => {
+            e.preventDefault();
             e.currentTarget.setPointerCapture(e.pointerId);
             onHoldStart();
           }}
           onPointerUp={onHoldEnd}
           onPointerCancel={onHoldEnd}
+          onLostPointerCapture={onHoldEnd}
           whileHover={{ scale: 1.03 }}
           whileTap={{ scale: 0.96 }}
           animate={active ? { scale: [1, 1.04, 1] } : { scale: 1 }}
