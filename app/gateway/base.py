@@ -68,6 +68,18 @@ class VehicleGateway(ABC):
         ...
 
     @abstractmethod
+    def set_frunk(self, open_: bool) -> Dict[str, Any]:
+        ...
+
+    @abstractmethod
+    def set_charge_port(self, open_: bool) -> Dict[str, Any]:
+        ...
+
+    @abstractmethod
+    def set_child_lock(self, enable: bool) -> Dict[str, Any]:
+        ...
+
+    @abstractmethod
     def set_light(self, target: str, enable: Optional[bool] = None, brightness: Optional[int] = None, color: Optional[str] = None) -> Dict[str, Any]:
         ...
 
@@ -89,6 +101,15 @@ class VehicleGateway(ABC):
         ...
 
     @abstractmethod
+    def seek_music(
+        self,
+        position_sec: Optional[float] = None,
+        delta_sec: Optional[float] = None,
+        percent: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        ...
+
+    @abstractmethod
     def play_radio(self, station_name: Optional[str] = None, category: Optional[str] = None) -> Dict[str, Any]:
         ...
 
@@ -97,12 +118,16 @@ class VehicleGateway(ABC):
         ...
 
     @abstractmethod
+    def switch_radio(self, direction: str) -> Dict[str, Any]:
+        ...
+
+    @abstractmethod
     def set_volume(self, volume: Optional[int] = None, delta: Optional[int] = None, muted: Optional[bool] = None) -> Dict[str, Any]:
         ...
 
     # ---- nav / driving / apps ----
     @abstractmethod
-    def navigate_to(self, destination: str, preference: str = "fastest") -> Dict[str, Any]:
+    def navigate_to(self, destination: str, preference: str = "fastest", origin: Optional[str] = None) -> Dict[str, Any]:
         ...
 
     @abstractmethod
@@ -110,7 +135,24 @@ class VehicleGateway(ABC):
         ...
 
     @abstractmethod
+    def search_nearby(
+        self,
+        keywords: str,
+        radius: int = 3000,
+        types: str = "",
+    ) -> Dict[str, Any]:
+        ...
+
+    @abstractmethod
     def set_adas(self, feature: str, enable: bool) -> Dict[str, Any]:
+        ...
+
+    @abstractmethod
+    def set_speed(self, speed_kmh: float, gear: Optional[str] = None, parked: Optional[bool] = None) -> Dict[str, Any]:
+        ...
+
+    @abstractmethod
+    def tick_dynamics(self, dt: float = 0.25) -> Dict[str, Any]:
         ...
 
     @abstractmethod
@@ -123,4 +165,20 @@ class VehicleGateway(ABC):
 
     @abstractmethod
     def set_assistant(self, persona: Optional[str] = None, speech_rate: Optional[str] = None, scene: Optional[str] = None) -> Dict[str, Any]:
+        ...
+
+    @abstractmethod
+    def set_wifi(self, enable: bool) -> Dict[str, Any]:
+        ...
+
+    @abstractmethod
+    def authorize_messages(self, enable: bool = True) -> Dict[str, Any]:
+        ...
+
+    @abstractmethod
+    def list_messages(self, unread_only: bool = False, mark_read: bool = True) -> Dict[str, Any]:
+        ...
+
+    @abstractmethod
+    def mark_messages_read(self, ids: Optional[List[str]] = None, all_unread: bool = False) -> Dict[str, Any]:
         ...

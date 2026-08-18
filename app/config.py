@@ -25,6 +25,19 @@ VLLM_MODEL_NAME = os.getenv("VLLM_MODEL_NAME", "qwen-4b-tesla")
 LLM_TIMEOUT_SEC = float(os.getenv("LLM_TIMEOUT_SEC", "45"))
 LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.2"))
 
+# Speech（百炼：千问 ASR + CosyVoice TTS）
+ASR_MODEL = os.getenv("ASR_MODEL", "qwen3-asr-flash")
+TTS_MODEL = os.getenv("TTS_MODEL", "cosyvoice-v3-flash")
+# 龙安欢：欢脱元气女，支持情感 Instruct
+TTS_VOICE = os.getenv("TTS_VOICE", "longanhuan")
+TTS_RATE = float(os.getenv("TTS_RATE", "1.12"))
+
+# 高德地图（MCP / Web 服务共用 Key；JS Key 可与之相同或单独申请）
+AMAP_MAPS_API_KEY = os.getenv("AMAP_MAPS_API_KEY", "") or os.getenv("AMAP_KEY", "")
+AMAP_JS_KEY = os.getenv("AMAP_JS_KEY", "") or AMAP_MAPS_API_KEY
+AMAP_JS_SECURITY_CODE = os.getenv("AMAP_JS_SECURITY_CODE", "")  # 可选：安全密钥
+
+
 # RAG
 RAG_BM25_TOPK = int(os.getenv("RAG_BM25_TOPK", "8"))
 RAG_MILVUS_TOPK = int(os.getenv("RAG_MILVUS_TOPK", "8"))
@@ -43,12 +56,17 @@ SESSION_TTL_SEC = int(os.getenv("SESSION_TTL_SEC", str(6 * 3600)))
 AGENT_SOFT_CONTEXT_CHARS = int(os.getenv("AGENT_SOFT_CONTEXT_CHARS", "24000"))
 AGENT_HARD_CONTEXT_CHARS = int(os.getenv("AGENT_HARD_CONTEXT_CHARS", "40000"))
 AGENT_KEEP_RECENT_MESSAGES = int(os.getenv("AGENT_KEEP_RECENT_MESSAGES", "16"))
-AGENT_MAX_LOOP_ITERS = int(os.getenv("AGENT_MAX_LOOP_ITERS", "3"))
+AGENT_MAX_LOOP_ITERS = int(os.getenv("AGENT_MAX_LOOP_ITERS", "5"))
 AGENT_ENABLE_AUTO_MEMORY = os.getenv("AGENT_ENABLE_AUTO_MEMORY", "1") != "0"
 
 STATE_DIR = BASE_DIR / "state"
 SESSIONS_DIR = STATE_DIR / "sessions"
-# 默认使用原有 webui（不要替换用户现有界面）
+SESSION_DB_PATH = Path(os.getenv("SESSION_DB_PATH", str(STATE_DIR / "cabin_sessions.db")))
+# 默认使用用户原有 webui（不要替换用户现有界面）
 WEBUI_DIR = BASE_DIR / "webui"
 ALT_WEBUI_DIR = BASE_DIR / "app" / "web"
+FRONTEND_DIR = BASE_DIR / "frontend"
+FRONTEND_DIST = FRONTEND_DIR / "dist"
+# 有构建产物时优先托管 React 座舱 HMI
+PREFER_CABIN_HMI = os.getenv("PREFER_CABIN_HMI", "1") != "0"
 PDF_PATH = BASE_DIR / "static" / "pdf" / "Tesla_Manual.pdf"

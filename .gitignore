@@ -59,3 +59,8 @@ RAG-Retrieval/**/*.safetensors
 .idea/
 .vscode/
 *.swp
+
+# ===== frontend =====
+frontend/node_modules/
+# dist 纳入版本库，便于 python run.py 直接托管座舱 HMI
+# frontend/dist/
