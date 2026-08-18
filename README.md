@@ -1,7 +1,7 @@
 # Tesla System · 智能座舱 Agent
 
 多意图车载助手（「小特」）：自然语言控车 + RAG 手册问答 + React 座舱 HMI。  
-不是 ChatGPT 套壳，而是带 **Gateway 车控、Policy 确认、可观测轨迹** 的 Cabin Runtime。
+带 **Gateway 车控、Policy 确认、可观测轨迹** 的 Cabin Runtime。
 
 > GitHub: [Xiangyahaian/tesla_system](https://github.com/Xiangyahaian/tesla_system)
 
