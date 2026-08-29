@@ -2,9 +2,13 @@
 """RAG 薄封装：复用现有 context.rag_engine.RAGEngine（策略保持原样）。"""
 from __future__ import annotations
 
+import logging
 import threading
 import time
+import warnings
 from typing import Any, Dict, List, Optional, Tuple
+
+logger = logging.getLogger("tesla.rag")
 
 _RETRY_AFTER_SEC = 12.0
 _MAX_IMAGES_PER_DOC = 8
@@ -62,19 +66,27 @@ class RagService:
             if self._error and (time.time() - self._error_ts) < _RETRY_AFTER_SEC:
                 return
             try:
-                print("[RAG] 正在加载知识库引擎(BM25+Milvus+Reranker)，请稍候...")
-                from context.rag_engine import RAGEngine
+                logger.info("loading retrieval stack")
+                with warnings.catch_warnings():
+                    warnings.filterwarnings(
+                        "ignore",
+                        message=r".*pkg_resources is deprecated.*",
+                        category=UserWarning,
+                    )
+                    from context.rag_engine import RAGEngine
 
-                self._engine = RAGEngine()
+                    self._engine = RAGEngine()
                 self._error = None
                 self._error_ts = 0.0
-                print("[RAG] 引擎加载完成")
+                logger.info("retrieval stack ready")
             except Exception as e:
                 self._error = str(e)
                 self._error_ts = time.time()
                 self._engine = None
-                print(f"[RAG] 引擎加载失败: {e}")
-                print("[RAG] 常见原因：同时开了多个 python run.py，milvus.db 只能被一个进程打开。请只留一个后端。")
+                logger.error(
+                    "retrieval stack failed: %s (milvus.db may be locked by another process)",
+                    e,
+                )
 
     @property
     def available(self) -> bool:
@@ -89,18 +101,15 @@ class RagService:
         if self._warmed:
             return True
         try:
-            print("[RAG] 热身检索中...")
             self._engine.milvus.retrieve_topk("warmup query", topk=3)
-            # 顺带热一下 BM25/jieba
             try:
                 self._engine.bm25.retrieve_topk("warmup query", topk=3)
             except Exception:
                 pass
             self._warmed = True
-            print("[RAG] 热身完成，知识问答可直接使用")
             return True
         except Exception as e:
-            print(f"[RAG] 热身跳过: {e}")
+            logger.warning("warmup skipped: %s", e)
             self._warmed = True  # 避免反复卡死
             return False
 
