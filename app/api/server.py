@@ -67,10 +67,7 @@ async def startup():
             rag_status = f"warmup failed ({e})"
 
     hmi = "cabin" if (HAS_CABIN_HMI and config.PREFER_CABIN_HMI) else "legacy"
-    print(
-        f"  startup  registry ok  ·  rag {rag_status}  ·  ui {hmi}",
-        flush=True,
-    )
+    print(f"startup complete  rag={rag_status}  ui={hmi}", flush=True)
 
 
 @app.get("/", response_class=HTMLResponse)
