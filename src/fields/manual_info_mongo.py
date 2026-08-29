@@ -1,9 +1,4 @@
 # -*- coding: utf-8 -*-
-# --------------------------------------------
-# 项目名称: LLM任务型对话Agent
-# 版权所有  ©丁师兄大模型
-# --------------------------------------------
-
 from typing import Optional
 
 from pydantic import BaseModel, Field
