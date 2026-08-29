@@ -1,5 +1,4 @@
 # -*- coding: utf-8 -*-
-# 项目名称: LLM多意图任务型对话Agent V12 - 本地/远程双模式支持
 # 基于 infer11.py，核心改进：
 # 1. 支持命令行参数切换：local = 本地vLLM，remote = Moonshot AI (Kimi 2.5)
 # 2. 新增 Moonshot AI API 客户端封装

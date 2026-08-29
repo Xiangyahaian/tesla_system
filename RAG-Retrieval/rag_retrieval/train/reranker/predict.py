@@ -1,10 +1,4 @@
 # -*- coding: utf-8 -*-
-# --------------------------------------------
-# 项目名称: LLM任务型对话Agent
-# 版权所有  ©丁师兄大模型
-# --------------------------------------------
-
-
 import json
 from FlagEmbedding import FlagReranker
 model_path = "output/bert_ex1/runs/checkpoints/checkpoint_0/"
