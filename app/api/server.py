@@ -56,20 +56,21 @@ async def startup():
     if config.RESET_ON_STARTUP:
         get_session_store().reset("default")
 
+    rag_status = "disabled"
     if config.RAG_ENABLE and config.RAG_WARMUP_ON_STARTUP:
         try:
             from app.rag.service import get_rag_service
 
-            get_rag_service().warmup()
+            ok = get_rag_service().warmup()
+            rag_status = "ready" if ok else "unavailable"
         except Exception as e:
-            print(f"[RAG] 启动预热失败（知识问答可能首问较慢）: {e}")
+            rag_status = f"warmup failed ({e})"
 
-    print(f"[CabinRuntime] ready on http://{config.HOST}:{config.PORT}")
-    if HAS_CABIN_HMI and config.PREFER_CABIN_HMI:
-        print(f"[CabinRuntime] HMI: {CABIN_DIST}")
-        print(f"[CabinRuntime] Legacy UI: /legacy")
-    else:
-        print(f"[CabinRuntime] UI: {config.WEBUI_DIR / 'index.html'}")
+    hmi = "cabin" if (HAS_CABIN_HMI and config.PREFER_CABIN_HMI) else "legacy"
+    print(
+        f"  startup  registry ok  ·  rag {rag_status}  ·  ui {hmi}",
+        flush=True,
+    )
 
 
 @app.get("/", response_class=HTMLResponse)

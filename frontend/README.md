@@ -15,7 +15,7 @@ Vite + React + TypeScript + Zustand cockpit UI, served by the Cabin Runtime.
 
 ```bash
 # terminal 1 — API + static host
-conda activate tesla && python -m app
+conda activate tesla && python run.py
 
 # terminal 2 — Vite HMR
 cd frontend
@@ -27,6 +27,6 @@ npm run dev   # http://127.0.0.1:5173 → proxies API to :6006
 
 ```bash
 cd frontend && npm run build
-python -m app
+python run.py
 # http://127.0.0.1:6006  (serves frontend/dist)
 ```

@@ -1,16 +1,17 @@
-# Legacy entry points
+# Legacy
 
-The following paths belong to the V1 demo stack and are **not** the default runtime:
+V1 demo stack (not the default Cabin Runtime):
 
-- `run.py`（原 V1 入口）
-- `infer.py`
-- `context/`
-- local `skills/` / `webui/` (gitignored, not published)
+| Path | Notes |
+|------|--------|
+| `legacy/v1_server.py` | Former root entry (`python legacy/v1_server.py`) |
+| `infer.py` | Older dual-mode experiment |
+| `context/` | V1 orchestration helpers |
+| local `skills/` / `webui/` | Gitignored; not published |
 
-Use the Cabin Runtime instead:
+Default:
 
 ```bash
-python -m app
+python run.py
+# same as: python -m app
 ```
-
-Current architecture lives under `app/` (API, NLU, agent loop, gateway, RAG, speech, sessions). The React HMI lives under `frontend/`.

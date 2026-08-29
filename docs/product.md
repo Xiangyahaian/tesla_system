@@ -20,7 +20,7 @@ Cabin Runtime V2：语义 NLU + 真流式 + 工具控车 + RAG 手册，前端�
 
 ## Operating Context
 
-- 入口：`python -m app`（约 6006）；前端 Vite React HMI
+- 入口：`python run.py`（约 6006）；前端 Vite React HMI
 - 主表面：驾驶助手（左右 50/50）、车机应用、执行轨迹、系统设置
 - 五座位：主驾 / 副驾 / 左后 / 中后 / 右后；指令默认可跟当前座位
 - 语言：全中文 UI

@@ -24,7 +24,7 @@ Repository: [Xiangyahaian/tesla_system](https://github.com/Xiangyahaian/tesla_sy
 Voice / text
     │
     ▼
-FastAPI  (python -m app · default :6006)
+FastAPI  (python run.py · default :6006)
     │
     ├─ NLU / Agent Loop ──► Tool Registry ──► Vehicle Gateway
     │                              └─► per-user vehicle state
@@ -76,7 +76,7 @@ Never commit `.env`, private keys, or personal API tokens.
 
 ```bash
 cd frontend && npm install && npm run build && cd ..
-python -m app
+python run.py
 ```
 
 Open <http://127.0.0.1:6006>
@@ -91,7 +91,7 @@ Open <http://127.0.0.1:6006>
 Frontend hot reload:
 
 ```bash
-python -m app                 # terminal 1
+python run.py                 # terminal 1
 cd frontend && npm run dev    # terminal 2 (:5173)
 ```
 
