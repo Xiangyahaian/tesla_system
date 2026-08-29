@@ -74,7 +74,7 @@ class RagService:
                 self._error_ts = time.time()
                 self._engine = None
                 print(f"[RAG] 引擎加载失败: {e}")
-                print("[RAG] 常见原因：同时开了多个 python run.py，milvus.db 只能被一个进程打开。请只留一个后端。")
+                print("[RAG] 常见原因：同时开了多个 python -m app，milvus.db 只能被一个进程打开。请只留一个后端。")
 
     @property
     def available(self) -> bool:

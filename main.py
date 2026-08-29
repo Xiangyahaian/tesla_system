@@ -3,8 +3,7 @@
 [LEGACY] Tesla多意图Agent - 旧入口
 
 请改用新架构：
-    python run.py
-    # 或 python -m app.api.server
+    python -m app
 
 详见 docs/legacy.md
 """

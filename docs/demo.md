@@ -1,6 +1,6 @@
 # Demo walkthrough (~3–4 minutes)
 
-Entry: `python run.py` → http://127.0.0.1:6006  
+Entry: `python -m app` → http://127.0.0.1:6006  
 (Build frontend first: `cd frontend && npm run build`)
 
 ## Opening
