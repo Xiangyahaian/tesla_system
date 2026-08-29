@@ -1,12 +1,4 @@
 # -*- coding: utf-8 -*-
-"""
-[LEGACY] Tesla多意图Agent - 旧入口
-
-请改用新架构：
-    python -m app
-
-详见 docs/legacy.md
-"""
 import importlib
 import os
 import sys
@@ -16,7 +8,7 @@ import asyncio
 import traceback
 import logging
 from pathlib import Path
-from fastapi.staticfiles import StaticFiles  # 👈 只加这一行
+from fastapi.staticfiles import StaticFiles  #
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse, HTMLResponse, FileResponse, JSONResponse

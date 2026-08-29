@@ -82,7 +82,7 @@ class RagService:
         return self._engine is not None
 
     def warmup(self) -> bool:
-        """启动时预热，避免首问卡在加载模型。与旧 main.py 行为一致。"""
+        """启动时预热，避免首问卡在加载模型。"""
         self._ensure()
         if not self._engine:
             return False

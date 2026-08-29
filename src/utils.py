@@ -11,10 +11,10 @@ manual_collection = MongoConfig.get_collection("manual_text")
 
 # 路径解析功能（嵌入 utils）
 def _get_project_root() -> Path:
-    """查找项目根目录（包含 main.py 的目录）"""
+    """查找项目根目录（包含 run.py 的目录）"""
     cwd = Path.cwd()
     for _ in range(5):
-        if (cwd / "main.py").exists():
+        if (cwd / "run.py").exists():
             return cwd
         parent = cwd.parent
         if parent == cwd:

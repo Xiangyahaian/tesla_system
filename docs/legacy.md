@@ -2,7 +2,7 @@
 
 The following paths belong to the V1 demo stack and are **not** the default runtime:
 
-- `main.py`
+- `run.py`（原 V1 入口）
 - `infer.py`
 - `context/`
 - local `skills/` / `webui/` (gitignored, not published)

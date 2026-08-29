@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-路径解析工具 - 以 main.py 为基准的相对路径处理
+路径解析工具 - 以 run.py 为基准的相对路径处理
 
 功能：将 MongoDB 中的绝对路径（如 /root/autodl-tmp/RAG/data/xxx）
       转换为本地相对路径（./data/xxx）
@@ -19,19 +19,18 @@ from typing import Dict, List, Any
 
 
 def _find_project_root() -> Path:
-    """查找项目根目录（包含 main.py 的目录）"""
+    """查找项目根目录（包含 run.py 的目录）"""
     # 从当前文件向上查找
     current = Path(__file__).resolve().parent  # utils/
     current = current.parent  # 项目根目录
     
-    # 检查是否有 main.py
-    if (current / "main.py").exists():
+    if (current / "run.py").exists():
         return current
     
     # 如果没有，从当前工作目录查找
     cwd = Path.cwd()
     for _ in range(5):
-        if (cwd / "main.py").exists():
+        if (cwd / "run.py").exists():
             return cwd
         parent = cwd.parent
         if parent == cwd:

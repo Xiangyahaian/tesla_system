@@ -54,7 +54,7 @@ RAG_MILVUS_TOPK = int(os.getenv("RAG_MILVUS_TOPK", "8"))
 RAG_RERANK_TOPK = int(os.getenv("RAG_RERANK_TOPK", "4"))
 RAG_SCORE_THRESHOLD = float(os.getenv("RAG_SCORE_THRESHOLD", "0.15"))
 RAG_ENABLE = os.getenv("RAG_ENABLE", "1") != "0"
-# 启动时预热 RAG（与旧 main.py 一致），避免第一次提问卡很久
+# 启动时预热 RAG，避免第一次提问卡很久
 RAG_WARMUP_ON_STARTUP = os.getenv("RAG_WARMUP_ON_STARTUP", "1") != "0"
 
 # Runtime
