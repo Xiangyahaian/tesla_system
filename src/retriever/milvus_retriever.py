@@ -34,7 +34,28 @@ ID_MAX_LENGTH = 100
 COL_NAME = "hybrid_bge_m3" 
 
 mongo_collection = MongoConfig.get_collection("manual_text")
-connections.connect(uri=milvus_db_path)
+
+
+def _connect_local_milvus(uri: str, attempts: int = 6) -> None:
+    """Milvus Lite 同一时刻只能被一个进程打开；占用时等一下再试。"""
+    last: Exception | None = None
+    for i in range(max(1, attempts)):
+        try:
+            connections.connect(uri=uri)
+            return
+        except Exception as e:
+            last = e
+            text = (str(e) or "").lower()
+            locked = "opened by another" in text or "open local milvus" in text
+            if not locked or i + 1 >= attempts:
+                break
+            wait = 0.8 * (i + 1)
+            print(f"[Milvus] milvus.db 被其它进程占用，{wait:.1f}s 后重试（{i + 1}/{attempts}）")
+            time.sleep(wait)
+    raise last or RuntimeError("Open local milvus failed")
+
+
+_connect_local_milvus(milvus_db_path)
 embedding_handler = BGEM3EmbeddingFunction(model_name=bge_m3_model_path, device="cuda")
 
 

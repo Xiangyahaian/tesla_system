@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""轻量 Hooks：pre/post tool（Claude Code hooks 思路简化版）。"""
+"""轻量 Hooks：pre/post tool。"""
 from __future__ import annotations
 
 from typing import Any, Callable, Dict, List, Optional

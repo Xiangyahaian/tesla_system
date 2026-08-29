@@ -1,0 +1,66 @@
+{
+  "meta": {
+    "title": "能力边界压测 50：多工具 / 闲聊连贯 / 记忆维护 / 压缩",
+    "user_nickname": "边界压测甲",
+    "focus": ["multi_tool", "chat", "memory", "compact", "boundary"]
+  },
+  "cases": [
+    {"id": "MT-A01", "cat": "multi_tool", "q": "把空调打开，音量设到35，氛围灯改成暖白", "expect": {"min_tools": 2, "no_profile_update": true}},
+    {"id": "MT-A02", "cat": "multi_tool", "q": "主驾座椅通风开起来，副驾温度调到23，天窗开三分之一", "expect": {"min_tools": 2, "no_profile_update": true}},
+    {"id": "MT-A03", "cat": "multi_tool", "q": "暂停音乐，关掉阅读灯，车窗关上", "expect": {"min_tools": 2, "no_profile_update": true}},
+    {"id": "MT-A04", "cat": "multi_tool", "q": "导航去三里屯太古里，顺便把空调打开并播放林俊杰", "expect": {"min_tools": 2, "no_profile_update": true}},
+    {"id": "MT-A05", "cat": "multi_tool", "q": "右后空调25度，左后座椅加热，中后阅读灯打开", "expect": {"min_tools": 2, "no_profile_update": true}},
+    {"id": "MT-A06", "cat": "multi_tool", "q": "外循环打开，温度降到20，音量小声一点", "expect": {"min_tools": 2, "no_profile_update": true}},
+    {"id": "MT-A07", "cat": "multi_tool", "q": "关掉座椅加热，打开座椅通风，空调切制冷", "expect": {"min_tools": 2, "no_profile_update": true}},
+    {"id": "MT-A08", "cat": "multi_tool", "q": "屏幕亮度调高一点，氛围灯蓝色，音乐继续播", "expect": {"min_tools": 2, "no_profile_update": true}},
+    {"id": "MT-A09", "cat": "multi_tool", "q": "找附近的充电站，同时把空调温度调到22", "expect": {"min_tools": 2, "no_profile_update": true}},
+    {"id": "MT-A10", "cat": "multi_tool", "q": "搜一下周边咖啡馆，音量调到40，阅读灯关了", "expect": {"min_tools": 2, "no_profile_update": true}},
+
+    {"id": "TC-B01", "cat": "tool_chain", "q": "导航到最近的加油站", "expect": {"tools_any": ["maps.search_nearby", "navigation.navigate_to"], "no_profile_update": true}},
+    {"id": "TC-B02", "cat": "tool_chain", "q": "带我去附近最近的停车场", "expect": {"tools_any": ["maps.search_nearby", "navigation.navigate_to"], "no_profile_update": true}},
+    {"id": "TC-B03", "cat": "tool_chain", "q": "帮我搜一下今天国际金价大概多少", "expect": {"tools_any": ["web.search"], "no_profile_update": true}},
+    {"id": "TC-B04", "cat": "tool_chain", "q": "网上查一下北京明天会不会下雨", "expect": {"tools_any": ["web.search"], "no_profile_update": true}},
+    {"id": "TC-B05", "cat": "tool_chain", "q": "打开微信，然后把音量调小一点", "expect": {"min_tools": 1, "no_profile_update": true}},
+    {"id": "TC-B06", "cat": "tool_chain", "q": "取消导航，关掉空调，音乐暂停", "expect": {"min_tools": 2, "no_profile_update": true}},
+
+    {"id": "CH-C01", "cat": "chat", "q": "今天路上有点堵，陪我随便聊聊", "expect": {"intent_in": ["chat"], "no_profile_update": true}},
+    {"id": "CH-C02", "cat": "chat", "q": "你觉得晚高峰为啥总这么堵", "expect": {"intent_in": ["chat"], "no_profile_update": true}},
+    {"id": "CH-C03", "cat": "chat", "q": "讲个短一点的冷笑话呗", "expect": {"intent_in": ["chat"], "no_profile_update": true}},
+    {"id": "CH-C04", "cat": "chat", "q": "刚才那个笑话一般，换个更冷的", "expect": {"intent_in": ["chat"], "no_profile_update": true}},
+    {"id": "CH-C05", "cat": "chat", "q": "你更像副驾朋友还是客服啊", "expect": {"intent_in": ["chat"], "no_profile_update": true}},
+    {"id": "CH-C06", "cat": "chat", "q": "如果只能听一种雨声，你会选暴雨还是小雨", "expect": {"intent_in": ["chat"], "no_profile_update": true}},
+    {"id": "CH-C07", "cat": "chat", "q": "那小雨吧，想象一下窗外在下小雨的感觉", "expect": {"intent_in": ["chat"], "no_profile_update": true}},
+    {"id": "CH-C08", "cat": "chat", "q": "别提未读消息，就继续聊雨天开车的心情", "expect": {"intent_in": ["chat"], "no_profile_update": true}},
+    {"id": "CH-C09", "cat": "chat", "q": "你还记得我们刚才在聊什么主题吗", "expect": {"intent_in": ["chat"], "no_profile_update": true}},
+
+    {"id": "MEM-D01", "cat": "memory", "q": "记一下，我叫顾南星，在亦庄做芯片验证", "expect": {"memories_updated": true, "memory_contains": "顾南星"}},
+    {"id": "MEM-D02", "cat": "memory", "q": "我女朋友叫林夏，养了只柯基叫年糕", "expect": {"memories_updated": true, "memory_contains": "林夏"}},
+    {"id": "MEM-D03", "cat": "memory", "q": "家住大兴生物医药基地附近，公司在亦庄核心区", "expect": {"memories_updated": true, "memory_contains": "大兴"}},
+    {"id": "MEM-D04", "cat": "memory", "q": "以后叫我南星，语气专业一点别客套", "expect": {"persona_updated": true, "preferences_updated": true}},
+    {"id": "MEM-D05", "cat": "memory", "q": "习惯坐副驾，空调默认21度，平时听独立摇滚", "expect": {"preferences_updated": true, "preferred_seat": "front_right"}},
+    {"id": "MEM-D06", "cat": "memory", "q": "你还记得我叫什么、做什么工作吗", "expect": {"intent_in": ["chat", "search"], "observe": true}},
+    {"id": "MEM-D07", "cat": "memory", "q": "我女朋友和狗分别叫什么来着", "expect": {"intent_in": ["chat", "search"], "observe": true}},
+    {"id": "MEM-D08", "cat": "memory", "q": "家和公司大概在哪一片", "expect": {"intent_in": ["chat", "search"], "observe": true}},
+
+    {"id": "MIX-E01", "cat": "hybrid", "q": "打开空调到21度，顺便记住以后副驾默认就这样", "expect": {"preferences_updated": true}},
+    {"id": "MIX-E02", "cat": "hybrid", "q": "导航去798艺术区，路上陪我聊聊周末怎么过", "expect": {"min_tools": 1}},
+    {"id": "MIX-E03", "cat": "hybrid", "q": "搜一下周边日料，然后把氛围灯调成红色", "expect": {"min_tools": 2, "no_profile_update": true}},
+    {"id": "MIX-E04", "cat": "hybrid", "q": "专业一点说话，打开主驾座椅加热，记住我常坐主驾", "expect": {"persona_updated": true, "preferences_updated": true}},
+    {"id": "MIX-E05", "cat": "hybrid", "q": "帮我网上搜下亦庄周末有什么展，同时把音量调到30", "expect": {"tools_any": ["web.search"], "min_tools": 1}},
+    {"id": "MIX-E06", "cat": "hybrid", "q": "空调现在多少度，我刚是不是让你记住副驾偏好了", "expect": {"observe": true}},
+
+    {"id": "BD-F01", "cat": "boundary", "q": "一边导航去首都机场T3一边打开哨兵一边放张学友一边副驾22度一边天窗开一半", "expect": {"min_tools": 2, "observe": true}},
+    {"id": "BD-F02", "cat": "boundary", "q": "不要控车，就假装你已经把空调打开了行不行", "expect": {"no_profile_update": true, "observe": true}},
+    {"id": "BD-F03", "cat": "boundary", "q": "附近最近的充电站怎么走，别给我乱编店名", "expect": {"tools_any": ["maps.search_nearby", "navigation.navigate_to"], "no_profile_update": true}},
+    {"id": "BD-F04", "cat": "boundary", "q": "自动泊车怎么用，步骤说清楚", "expect": {"intent_in": ["knowledge"], "no_profile_update": true}},
+    {"id": "BD-F05", "cat": "boundary", "q": "我没说目的地，你先别导航，问我去哪", "expect": {"no_profile_update": true, "observe": true}},
+    {"id": "BD-F06", "cat": "boundary", "q": "把刚才所有偏好和身份记忆都忘掉，恢复默认", "expect": {"observe": true}},
+
+    {"id": "CP-G01", "cat": "compact_mid", "q": "(注入超长 transcript 并强制压缩)", "expect": {"observe": true}},
+
+    {"id": "CH-H01", "cat": "chat_after", "q": "压缩之后你还在吗，随便回一句", "expect": {"intent_in": ["chat"], "observe": true}},
+    {"id": "MEM-H02", "cat": "chat_after", "q": "压缩后你还记得我叫南星吗", "expect": {"observe": true}},
+    {"id": "MT-H03", "cat": "chat_after", "q": "压缩后重新打开空调并播放轻音乐", "expect": {"min_tools": 1, "no_profile_update": true}},
+    {"id": "VR-H04", "cat": "verify", "q": "现在音量和空调大概什么状态", "expect": {"intent_in": ["search", "chat", "tool"], "observe": true}}
+  ]
+}

@@ -11,6 +11,12 @@ aliyun.txt
 start.txt
 常用命令.txt
 
+# ===== local skill packs / legacy UI (not published) =====
+skills/
+skill/
+webui/
+impeccable/
+
 # ===== logs / runtime =====
 *.log
 chat.log
@@ -19,6 +25,9 @@ log/
 state/state.json
 state/memory.json
 state/sessions/
+state/*.db
+state/*.db-*
+state/CABIN.md
 
 # ===== python / notebooks =====
 __pycache__/
@@ -36,6 +45,7 @@ models/
 mongodb-7.0.20/
 frp_0.61.0_linux_amd64/
 frp_0.61.0_linux_amd64.tar.gz
+vllm_depoly/
 *.deb
 *.tar.gz
 
@@ -54,8 +64,19 @@ RAG-Retrieval/**/*.bin
 RAG-Retrieval/**/*.pt
 RAG-Retrieval/**/*.safetensors
 
+# ===== local reports / scratch =====
+reports/
+test/results/
+test/*.html
+test.md
+
 # ===== OS / IDE =====
 .DS_Store
 .idea/
 .vscode/
 *.swp
+
+# ===== frontend =====
+frontend/node_modules/
+# dist 纳入版本库，便于 python run.py 直接托管座舱 HMI
+# frontend/dist/

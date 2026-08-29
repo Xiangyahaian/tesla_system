@@ -1,105 +1,217 @@
 # -*- coding: utf-8 -*-
-"""文件型记忆：CABIN.md（持久指令）+ MEMORY.md（auto memory）。
-
-对齐 Claude Code 的 CLAUDE.md / auto memory 思路：可检查、可编辑、跨会话加载。
-"""
+"""用户画像门面：人设 / 身份记忆 / 行为偏好（三文件，无 CABIN.md）。"""
 from __future__ import annotations
 
+import re
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from app import config
+from app.agent.persona import build_persona_overlay, build_system_prompt, build_style_overlay
+from app.agent.profile_extract import extract_after_turn
+from app.agent.user_profile import PreferencesDelta, UserProfileStore, is_placeholder
 
-DEFAULT_CABIN_MD = """# Cabin Agent 指令（类似 CLAUDE.md）
+SEAT_ALIAS = {
+    "主驾": "front_left",
+    "驾驶位": "front_left",
+    "司机": "front_left",
+    "左边": "front_left",
+    "左座": "front_left",
+    "副驾": "front_right",
+    "副驾驶": "front_right",
+    "右边": "front_right",
+    "右座": "front_right",
+    "左后": "rear_left",
+    "后排左": "rear_left",
+    "中后": "rear_middle",
+    "后排中间": "rear_middle",
+    "右后": "rear_right",
+    "后排右": "rear_right",
+}
 
-## 人设
-你是车载助手「小特」：自然、口语、好说话，像靠谱朋友，不要像安全宣讲师。
+SEAT_CN = {
+    "front_left": "主驾",
+    "front_right": "副驾",
+    "rear_left": "左后",
+    "rear_middle": "中后",
+    "rear_right": "右后",
+}
 
-## 硬规则
-- 控车必须走工具，禁止口头假装已执行。
-- 问当前状态 → 读车辆 state；问手册用法 → 知识检索。
-- 高风险操作（解锁/后备箱/ADAS）需用户确认。
-- 避免政治/医疗/法律专业意见。
 
-## 闲聊
-- 正常聊天即可：吃什么、天气、心情、玩笑都可以直接答。
-- **禁止**每轮都提醒「专注驾驶 / 先停车再… / 注意安全」；除非用户明确在问行车安全或危险操作。
-- 回答简洁自然，1–3 句，不要说教。
+@dataclass
+class PreferenceDelta:
+    """兼容旧调用：偏好变更摘要。"""
 
-## Compact Instructions
-压缩上下文时优先保留：未完成任务、用户偏好、最近车控结果、待确认动作。
-"""
-
-DEFAULT_MEMORY_MD = """# Auto Memory
-
-（助手自动写入的偏好与长期事实，跨会话加载前 200 行 / 25KB）
-"""
+    preferred_seat: Optional[str] = None
+    climate_temps: Dict[str, float] = field(default_factory=dict)
+    climate_apply_all: Optional[bool] = None
+    display_name: Optional[str] = None
+    music_pref: Optional[str] = None
+    applied: bool = False
 
 
 class MemoryStore:
+    """每用户目录下的画像存储（跨会话共享；委托 UserProfileStore）。"""
+
     def __init__(self, session_dir: Path, global_cabin: Optional[Path] = None):
         self.session_dir = Path(session_dir)
-        self.memory_dir = self.session_dir / "memory"
-        self.memory_dir.mkdir(parents=True, exist_ok=True)
-        self.session_cabin = self.session_dir / "CABIN.md"
-        self.memory_md = self.memory_dir / "MEMORY.md"
-        self.global_cabin = Path(global_cabin or (config.STATE_DIR / "CABIN.md"))
-        self._ensure_files()
+        self._profile = UserProfileStore(self.session_dir)
 
-    def _ensure_files(self) -> None:
-        if not self.global_cabin.exists():
-            self.global_cabin.parent.mkdir(parents=True, exist_ok=True)
-            self.global_cabin.write_text(DEFAULT_CABIN_MD, encoding="utf-8")
-        if not self.session_cabin.exists():
-            # 会话级可覆盖；默认指向说明即可精简
-            self.session_cabin.write_text(
-                "# Session CABIN\n\n（会话级补充指令；全局规则见 state/CABIN.md）\n",
-                encoding="utf-8",
-            )
-        if not self.memory_md.exists():
-            self.memory_md.write_text(DEFAULT_MEMORY_MD, encoding="utf-8")
+    @property
+    def memory_dir(self) -> Path:
+        return self._profile.memory_dir
 
-    def load_cabin(self, max_chars: int = 8000) -> str:
-        parts = []
-        g = self.global_cabin.read_text(encoding="utf-8")[:max_chars]
-        parts.append(f"## Global CABIN.md\n{g}")
-        s = self.session_cabin.read_text(encoding="utf-8")[: max_chars // 2]
-        if s.strip():
-            parts.append(f"## Session CABIN.md\n{s}")
-        return "\n\n".join(parts)
+    def load_persona(self) -> Dict[str, Any]:
+        return self._profile.load_persona()
 
-    def load_auto_memory(self, max_lines: int = 200, max_bytes: int = 25_000) -> str:
-        raw = self.memory_md.read_bytes()[:max_bytes]
-        text = raw.decode("utf-8", errors="ignore")
-        lines = text.splitlines()[:max_lines]
-        return "\n".join(lines)
+    def load_memories(self) -> Dict[str, Any]:
+        return self._profile.load_memories()
 
-    def append_memory(self, note: str) -> None:
-        note = (note or "").strip()
-        if not note:
-            return
-        with self.memory_md.open("a", encoding="utf-8") as f:
-            f.write(f"\n- {note}\n")
+    def load_preferences(self) -> Dict[str, Any]:
+        return self._profile.load_preferences()
 
-    def maybe_extract(self, llm, user_query: str, assistant_text: str) -> Optional[str]:
-        """轻量 auto-memory：让模型判断是否值得写入长期偏好。"""
-        if not user_query or not assistant_text:
-            return None
-        # 启发式：偏好类短句才尝试，避免每轮都多一次 LLM
-        keys = ("喜欢", "不要", "习惯", "以后", "偏好", "默认", "总是", "别再")
-        if not any(k in user_query for k in keys):
+    def clear_all(self) -> None:
+        self._profile.clear_all()
+
+    def format_persona_block(self) -> str:
+        text = self._profile.read_persona_md()
+        overlay = build_persona_overlay({"text": text})
+        if overlay:
+            return overlay
+        return "(默认温暖陪伴)"
+
+    def format_memories_block(self, max_items: int = 20) -> str:
+        text = self._profile.read_memories_md().strip()
+        if is_placeholder(text):
+            return "(暂无身份记忆)"
+        head: List[str] = []
+        bullets: List[str] = []
+        for ln in text.splitlines():
+            if ln.strip().startswith(("- ", "* ", "• ")):
+                bullets.append(ln)
+            elif not bullets:
+                head.append(ln)
+        shown = bullets[-max_items:] if max_items and len(bullets) > max_items else bullets
+        return "\n".join([*head, *shown]).strip() or "(暂无身份记忆)"
+
+    def format_preferences_block(self) -> str:
+        text = self._profile.read_preferences_md().strip()
+        if is_placeholder(text):
+            return "(暂无偏好)"
+        return text
+
+    def build_system_prompt(self) -> str:
+        return build_system_prompt(self.load_persona())
+
+    def build_style_overlay(self) -> str:
+        return build_style_overlay(self.load_persona())
+
+    def extract_after_turn(self, llm, user_query: str, assistant_text: str = "", profile_plan=None):
+        if not config.AGENT_ENABLE_AUTO_MEMORY:
+            from app.agent.user_profile import ProfileExtractReport
+
+            return ProfileExtractReport()
+        return extract_after_turn(llm, self._profile, user_query, assistant_text, profile_plan=profile_plan)
+
+    def upsert_preferences(self, delta: PreferenceDelta) -> Dict[str, Any]:
+        pd = PreferencesDelta(
+            preferred_seat=delta.preferred_seat,
+            climate_temps=dict(delta.climate_temps),
+            climate_apply_all=delta.climate_apply_all,
+            display_name=delta.display_name,
+            music_pref=delta.music_pref,
+        )
+        self._profile.apply_preferences_delta(pd)
+        return self.load_preferences()
+
+    def preferred_temp_for(self, seat: str) -> Optional[float]:
+        v = (self.load_preferences().get("climate_temp_c") or {}).get(seat)
+        if v is None:
             return None
         try:
-            raw = llm.chat(
-                "从对话提取是否值得写入长期记忆的一条短事实。"
-                "若无需记忆，只返回 NONE。否则只返回一条中文短句，不要解释。",
-                f"用户: {user_query}\n助手: {assistant_text[:300]}",
-                temperature=0.0,
-            )
-            raw = (raw or "").strip()
-            if not raw or raw.upper() == "NONE" or len(raw) > 80:
-                return None
-            self.append_memory(raw)
-            return raw
+            return float(v)
         except Exception:
             return None
+
+    def detect_seat_mention(self, text: str) -> Optional[str]:
+        t = text or ""
+        for cn in sorted(SEAT_ALIAS.keys(), key=len, reverse=True):
+            if cn in t:
+                return SEAT_ALIAS[cn]
+        return None
+
+    def resolve_active_seat(
+        self,
+        ui_seat: Optional[str],
+        utterance: str,
+        *,
+        honor_memory: bool = True,
+    ) -> Tuple[str, str]:
+        from app.nlu.seat_context import normalize_active_seat
+
+        explicit = self.detect_seat_mention(utterance or "")
+        if explicit and re.search(
+            r"(副驾|主驾|左后|右后|中后|后排|驾驶|打开|关掉|调|温度|空调|座椅|加热|通风|车窗|吹)",
+            utterance or "",
+        ):
+            if not re.search(r"^我坐|^坐在|^我在副|^我在主", (utterance or "").strip()):
+                return explicit, "utterance"
+
+        prefs = self.load_preferences()
+        mem_seat = prefs.get("preferred_seat") if honor_memory else None
+        if mem_seat and _looks_self_cabin(utterance or ""):
+            if not explicit or explicit == mem_seat:
+                return normalize_active_seat(mem_seat), "memory"
+
+        if mem_seat and honor_memory and not explicit:
+            if re.search(r"(空调|温度|风量|座椅|加热|通风|按摩|车窗)", utterance or ""):
+                return normalize_active_seat(mem_seat), "memory"
+
+        if ui_seat:
+            return normalize_active_seat(ui_seat), "ui"
+        if mem_seat:
+            return normalize_active_seat(mem_seat), "memory"
+        return "front_left", "default"
+
+
+def _looks_self_cabin(text: str) -> bool:
+    if re.search(r"(我|给我|帮我|我这边|我这)", text):
+        return True
+    return bool(re.search(r"(打开空调|调温|温度|风量|座椅加热)", text))
+
+
+def build_preference_tool_calls(delta: PreferenceDelta):
+    from app.models import ToolCall
+
+    calls: List[ToolCall] = []
+    zones = list(delta.climate_temps.keys())
+    if not zones:
+        return calls
+
+    if len(zones) >= 5 or delta.climate_apply_all:
+        calls.append(
+            ToolCall(name="climate.set_power", arguments={"enable": True}, reason="按偏好开启全车空调")
+        )
+        for z, t in delta.climate_temps.items():
+            calls.append(
+                ToolCall(
+                    name="climate.set_temperature",
+                    arguments={"temperature": float(t), "zones": [z]},
+                    reason=f"应用偏好温度 {t:.0f}°C",
+                )
+            )
+        return calls
+
+    for z, t in delta.climate_temps.items():
+        calls.append(
+            ToolCall(name="climate.set_power", arguments={"enable": True, "zones": [z]}, reason="按偏好开空调")
+        )
+        calls.append(
+            ToolCall(
+                name="climate.set_temperature",
+                arguments={"temperature": float(t), "zones": [z]},
+                reason=f"应用偏好温度 {t:.0f}°C",
+            )
+        )
+    return calls
