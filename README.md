@@ -1,125 +1,124 @@
 # Tesla System
 
-基于多意图识别的智能座舱问答与控车系统。面向车载口语场景，统一处理手册问答、指令执行、车况查询与闲聊，并提供可演示的 React 座舱 HMI。
+Intelligent cabin agent for vehicle Q&A and control: multi-intent NLU, tool-calling gateway, handbook RAG, and a React cockpit HMI.
 
-仓库地址：[Xiangyahaian/tesla_system](https://github.com/Xiangyahaian/tesla_system)
-
----
-
-## 系统概览
-
-| 能力 | 说明 |
-|------|------|
-| 多意图编排 | 规则快路径 + Structured NLU；复杂句走 ReAct 多步规划（最多 5 步） |
-| 工具控车 | 气候 / 座椅 / 舱体 / 媒体 / 导航 / ADAS 等 JSON Schema 工具，经 Gateway 回写车况 |
-| 手册 RAG | PyMuPDF 解析 + MongoDB / Milvus；稠密+稀疏+BM25 多路召回，Rerank 精排 |
-| 记忆与安全 | 每用户 persona / memories / preferences 三文件；高风险操作 Policy 确认 |
-| 座舱 HMI | Vite + React：驾驶页、应用、Agent 轨迹、设置；语音 ASR / TTS 可选 |
+Repository: [Xiangyahaian/tesla_system](https://github.com/Xiangyahaian/tesla_system)
 
 ---
 
-## 架构
+## Features
+
+| Area | What it does |
+|------|----------------|
+| Multi-intent orchestration | Rule fast-path + structured NLU; complex utterances use a bounded ReAct loop (≤ 5 steps) |
+| Vehicle tools | Climate / seats / cabin / media / navigation / ADAS via JSON Schema tools and a Gateway |
+| Handbook RAG | PDF parse → MongoDB / Milvus; dense + sparse + BM25 recall with rerank |
+| Memory & safety | Per-user persona / memories / preferences; Policy gate for high-risk actions |
+| Cabin HMI | Vite + React: Drive, Apps, Agent trace, Settings; optional ASR / TTS |
+
+---
+
+## Architecture
 
 ```text
-语音 / 文本
+Voice / text
     │
     ▼
-FastAPI  (python run.py · 默认 :6006)
+FastAPI  (python run.py · default :6006)
     │
     ├─ NLU / Agent Loop ──► Tool Registry ──► Vehicle Gateway
-    │                              │
-    │                              └─► vehicle.json（按用户隔离）
-    ├─ RAG（手册检索 + 引用）
-    ├─ 记忆落盘（persona / memories / preferences）
-    └─ 静态托管 frontend/dist
+    │                              └─► per-user vehicle state
+    ├─ RAG (handbook retrieval + citations)
+    ├─ Profile memory (persona / memories / preferences)
+    └─ Static hosting of frontend/dist
 ```
 
-| 路径 | 说明 |
+| Path | Role |
 |------|------|
-| `app/` | 后端 Runtime：API、编排、NLU、工具、Gateway、RAG、语音、会话 |
-| `frontend/` | 座舱 HMI（React + TypeScript + Zustand） |
-| `data/` | 手册与评测语料（本地索引 / Mongo 数据默认不入库） |
-| `tests/` / `test/` | 单元测试与压测用例 |
-| `docs/` | 规则目录等补充文档 |
-| `state/` | 运行时状态（本地生成，勿提交密钥与会话库） |
+| `app/` | Backend runtime: API, orchestration, NLU, tools, gateway, RAG, speech, sessions |
+| `frontend/` | Cabin HMI (React + TypeScript + Zustand) |
+| `src/` | Retrieval / ranking / PDF pipeline used by RAG |
+| `data/` | Handbook & evaluation corpora (local indexes are gitignored) |
+| `tests/` | Unit tests |
+| `test/` | Integration / stress fixtures and runners |
+| `docs/` | Product, design, demo, and architecture notes |
+| `scripts/` | Offline evaluation utilities |
+| `state/` | Runtime state (local only; do not commit secrets / session DBs) |
 
 ---
 
-## 环境要求
+## Requirements
 
-- Python 3.10+（推荐 conda 环境 `tesla`）
-- Node.js 18+（构建前端）
-- 可选：MongoDB、Milvus（Lite）、本地 vLLM 或云端 LLM Key
+- Python 3.10+ (conda env `tesla` recommended)
+- Node.js 18+ (frontend build)
+- Optional: MongoDB, Milvus (Lite), local vLLM or cloud LLM keys
 
 ```bash
 conda activate tesla
 pip install -r requirements.txt
-cp .env.example .env   # 填入 LLM / 地图等配置
+cp .env.example .env   # fill LLM / map keys
 ```
 
-### 关键配置（`.env`）
+### Key environment variables
 
-| 变量 | 用途 |
-|------|------|
-| `BAILIAN_*` | 阿里云百炼对话 / 语音（远程模型） |
-| `VLLM_*` | 本地 vLLM 端点与模型名 |
-| `AMAP_MAPS_API_KEY` / `AMAP_JS_KEY` | 高德路径规划与前端地图 |
-| `APP_PORT` | 服务端口，默认 `6006` |
+| Variable | Purpose |
+|----------|---------|
+| `BAILIAN_*` | Bailian chat / speech (remote) |
+| `VLLM_*` | Local vLLM endpoint and model name |
+| `AMAP_MAPS_API_KEY` / `AMAP_JS_KEY` | Amap routing and frontend map |
+| `APP_PORT` | Server port (default `6006`) |
 
-请勿将 `.env`、私钥或个人 API Key 提交到仓库。
+Never commit `.env`, private keys, or personal API tokens.
 
 ---
 
-## 启动
+## Quick start
 
 ```bash
-# 构建座舱前端（首次或前端变更后）
 cd frontend && npm install && npm run build && cd ..
-
-# 启动后端（托管 frontend/dist）
 python run.py
 ```
 
-浏览器访问：<http://127.0.0.1:6006>
+Open <http://127.0.0.1:6006>
 
-前端热更新开发：
+| Route | Page |
+|-------|------|
+| `/` | Drive: chat + vehicle / map |
+| `/apps` | In-car apps |
+| `/agent` | Agent trace and model I/O |
+| `/settings` | Model, speech, tool registry |
+
+Frontend hot reload:
 
 ```bash
-python run.py                 # 终端 1
-cd frontend && npm run dev    # 终端 2，通常 :5173
+python run.py                 # terminal 1
+cd frontend && npm run dev    # terminal 2 (:5173)
 ```
 
-| 路由 | 说明 |
-|------|------|
-| `/` | 驾驶页：对话 + 车况 / 地图 |
-| `/apps` | 车机应用 |
-| `/agent` | Agent 轨迹与本轮模型输入 |
-| `/settings` | 模型、语音、工具等设置 |
+---
+
+## Design highlights
+
+1. **Dual intent path** — short commands stay on the code fast-path; long / multi-domain utterances go to the LLM.
+2. **Plan after observe** — independent tools may run in parallel; dependent steps use tool results; bad args can be corrected.
+3. **Per-user vehicle isolation** — one user, one car under `state/sessions/<user_id>/`.
+4. **Three-file profile** — persona / memories / preferences rewritten on disk after turns without blocking speech reply.
+5. **Safety gate** — speed / gear / tool risk drive reject-or-confirm.
+
+More detail: [docs/product.md](docs/product.md), [docs/design.md](docs/design.md), [docs/demo.md](docs/demo.md).
 
 ---
 
-## 设计要点（摘要）
-
-1. **意图双通道**：短指令可走代码快路径；超长 / 多域复合句交给 LLM，避免误解析。
-2. **观察后再规划**：无依赖工具可并行；有依赖按返回结果拆步，失败可纠参。
-3. **用户级车况隔离**：一用户一辆车（`state/sessions/<user_id>/`），会话间共享车况、分开 transcript。
-4. **画像三文件**：人设 / 身份记忆 / 偏好语义改写落盘；轮末更新不阻塞口语回复。
-5. **安全门控**：结合车速、挡位与工具风险等级，拒绝或二次确认。
-
-更细的产品约定见 [`PRODUCT.md`](PRODUCT.md)，演示剧本见 [`DEMO.md`](DEMO.md)。
-
----
-
-## 测试
+## Tests
 
 ```bash
 python -m unittest discover -s tests -v
 ```
 
-压测用例与脚本位于 `test/`（需本地或远程模型可用）。
+Stress / profile runners live under `test/` (require a configured model endpoint).
 
 ---
 
 ## License
 
-如无另行声明，本仓库仅供学习与演示。第三方依赖（含 `RAG-Retrieval` 等）遵循各自许可证。
+For learning and demonstration unless stated otherwise. Third-party components (including `RAG-Retrieval`) keep their own licenses.

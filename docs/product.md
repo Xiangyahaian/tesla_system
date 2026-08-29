@@ -40,4 +40,3 @@ Cabin Runtime V2：语义 NLU + 真流式 + 工具控车 + RAG 手册，前端�
 ## Open Decisions
 
 - 正式品牌资产（Logo 矢量）暂缺，以字标「小特」呈现
-- 是否合入 main / 对外演示域名由用户决定

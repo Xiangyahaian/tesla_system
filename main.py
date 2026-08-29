@@ -6,9 +6,8 @@
     python run.py
     # 或 python -m app.api.server
 
-详见 LEGACY.md / CHANGES_V2.md
+详见 docs/legacy.md
 """
-import importlib
 import importlib
 import os
 import sys

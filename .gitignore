@@ -64,10 +64,13 @@ RAG-Retrieval/**/*.bin
 RAG-Retrieval/**/*.pt
 RAG-Retrieval/**/*.safetensors
 
-# ===== local reports / scratch =====
+# ===== local reports / eval dumps / scratch =====
 reports/
 test/results/
-test/*.html
+test/eval_results/
+test/ragas_results/
+test/*_report.md
+test/*_report.html
 test.md
 
 # ===== OS / IDE =====

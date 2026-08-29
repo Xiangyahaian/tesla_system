@@ -1,44 +1,34 @@
-# 画像 / 记忆 / 偏好 / 压缩 — 真实测试目录
+# Integration & stress tests
 
-## 结构
+Runnable suites against a live model endpoint (local vLLM or remote). Unit tests live in `tests/`.
 
-```
+## Layout
+
+```text
 test/
-├── README.md                 # 本说明
-├── REPORT.md                 # 最近一次测试报告（自动生成）
-├── ISSUES.md                 # 问题梳理与根因
-├── test_cases.json             # 30+ 用例定义（可扩展）
+├── README.md
+├── test_cases*.json          # scenario fixtures
 ├── run_profile_compact_test.py
-├── diagnose_extract.py       # 抽取链路诊断
-└── results/
-    └── memtest_*_results.json  # 完整 JSON（耗时、token、每轮结果）
+├── run_stress_*.py
+├── diagnose_extract.py
+├── results/                  # local run outputs (gitignored)
+└── eval_results/             # local eval dumps (gitignored)
 ```
 
-## 如何复跑
+## Profile / compact suite
 
 ```bash
 conda activate tesla
-cd /home/xiangyahaian/tesla_system
 python test/run_profile_compact_test.py
 ```
 
-要求：
-- 本地 vLLM 可用（`.env` 中 `VLLM_API_BASE`，当前 `http://192.168.1.100:8000/v1`）
-- `AGENT_ENABLE_AUTO_MEMORY=1`
+Requires a configured model in `.env` (`VLLM_*` or Bailian) and `AGENT_ENABLE_AUTO_MEMORY=1`.
 
-## 最近一次真实测试
+## Stress suites
 
-| 项 | 值 |
-|----|-----|
-| 运行 ID | `memtest_20260823_204010` |
-| 会话 ID | `memtest_20260823_204010_f5bb8a8f` |
-| 用例数 | 30（见 `test/test_cases.json`） |
-| 模型 | `qwen-4b-tesla` |
-| 总耗时 | **287.6 s**（30 轮 + 压缩） |
-| 总 Token | **117,783** |
-| 通过率 | **27/30** |
-| 压缩 | **PASS** |
+```bash
+python test/run_stress_100.py
+python test/run_stress_suite.py
+```
 
-用例定义：`test/test_cases.json`（可增删后复跑）
-
-会话数据：`state/sessions/memtest_20260823_204010_f5bb8a8f/`
+Fixtures: `test/test_cases_stress_*.json`. Generated reports stay local and are not committed.
