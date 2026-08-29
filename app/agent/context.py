@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
-"""上下文组装：有序 source 拼装（对齐 Claude Code context assembly）。"""
+"""上下文组装：按来源有序拼装座舱对话上下文。"""
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Dict, List, Optional
 
 from app.agent.memory import MemoryStore
@@ -19,48 +20,52 @@ class ContextAssembler:
         vehicle_state: Dict[str, Any],
         extra_user: str = "",
         recent_limit: int = 12,
+        keep_turns: Optional[int] = None,
     ) -> ContextBundle:
         sources: List[str] = []
-        cabin = memory.load_cabin()
-        sources.append("cabin_md")
-        auto_mem = memory.load_auto_memory()
-        sources.append("auto_memory")
+        persona_block = memory.format_persona_block()
+        sources.append("persona")
+        memories_block = memory.format_memories_block()
+        sources.append("memories")
+        prefs_block = memory.format_preferences_block()
+        sources.append("preferences")
 
         slim = _slim_vehicle(vehicle_state)
         vehicle_txt = json.dumps(slim, ensure_ascii=False)
         sources.append("vehicle_state")
 
-        msgs = transcript.load()
-        compact_bits = [m.content for m in msgs if m.role == MessageRole.COMPACTION]
-        compact_txt = "\n---\n".join(compact_bits[-2:]) if compact_bits else ""
+        turns = keep_turns if keep_turns is not None else max(1, (recent_limit + 1) // 2)
+        window = transcript.load_for_context(keep_turns=turns)
+        compact_bits = [m.content for m in window if m.role == MessageRole.COMPACTION]
+        compact_txt = "\n---\n".join(compact_bits) if compact_bits else ""
         if compact_txt:
             sources.append("compaction")
 
-        recent = [m for m in msgs if m.role != MessageRole.COMPACTION][-recent_limit:]
+        recent = [m for m in window if m.role != MessageRole.COMPACTION]
         dialog = _format_dialog(recent)
         sources.append("transcript_recent")
 
         user_context_parts = [
-            "### Persistent Instructions (CABIN.md)",
-            cabin,
-            "### Auto Memory (MEMORY.md)",
-            auto_mem or "(空)",
-            "### Structured Preferences (preferences.json)",
-            memory.format_preferences_block(),
-            "### Vehicle State Snapshot",
+            "### 用户人设 (persona.md)",
+            persona_block,
+            "### 身份记忆 (memories.md)",
+            memories_block,
+            "### 行为偏好 (preferences.md)",
+            prefs_block,
+            "### 车辆状态快照",
             vehicle_txt,
         ]
-        sources.append("preferences")
         if compact_txt:
-            user_context_parts += ["### Compaction Summary", compact_txt]
+            user_context_parts += ["### 压缩摘要", compact_txt]
         if extra_user:
-            user_context_parts += ["### Extra", extra_user]
+            user_context_parts += ["### 附加材料", extra_user]
             sources.append("extra")
 
         user_context = "\n\n".join(user_context_parts)
-        total = len(SYSTEM_CORE) + len(user_context) + len(dialog)
+        system = memory.build_system_prompt()
+        total = len(system) + len(user_context) + len(dialog)
         return ContextBundle(
-            system=SYSTEM_CORE,
+            system=system,
             user_context=user_context,
             recent_dialog=dialog,
             total_chars=total,
@@ -68,17 +73,19 @@ class ContextAssembler:
         )
 
     def memory_hint(self, bundle: ContextBundle, transcript: TranscriptStore, limit: int = 8) -> str:
-        """给 StructuredNLU 用的短历史 + 结构化偏好。"""
+        """给 StructuredNLU：偏好默认值 + 简要身份记忆 + 近轮对话。"""
         base = transcript.hint(limit=limit)
-        pref = ""
-        if "Structured Preferences" in bundle.user_context:
-            pref = bundle.user_context.split("### Structured Preferences")[-1].split("###")[0].strip()
-            pref = pref[:400]
         bits = []
-        if pref:
-            bits.append(pref)
-        if "Compaction Summary" in bundle.user_context:
-            bits.append(bundle.user_context.split("### Compaction Summary")[-1][:200])
+        if "### 行为偏好" in bundle.user_context:
+            bits.append(
+                bundle.user_context.split("### 行为偏好")[-1].split("###")[0].strip()[:400]
+            )
+        if "### 身份记忆" in bundle.user_context:
+            mem = bundle.user_context.split("### 身份记忆")[-1].split("###")[0].strip()
+            if mem and "(暂无" not in mem:
+                bits.append(mem[:350])
+        if "压缩摘要" in bundle.user_context:
+            bits.append(bundle.user_context.split("### 压缩摘要")[-1][:200])
         bits.append(base)
         return " || ".join(bits)[:900]
 
@@ -140,7 +147,10 @@ def _slim_vehicle(st: Dict[str, Any]) -> Dict[str, Any]:
             "displays": cabin.get("displays") or {},
         },
         "driving": st.get("driving"),
-        "apps": st.get("apps"),
+        "apps": {
+            "active": (st.get("apps") or {}).get("active"),
+            "running": (st.get("apps") or {}).get("running") or [],
+        },
     }
 
 
@@ -226,7 +236,7 @@ def slim_vehicle_for_query(st: Dict[str, Any], query: str) -> Dict[str, Any]:
 
 def strip_vehicle_snapshot_block(user_context: str) -> str:
     """去掉上下文里的完整 Vehicle State 段，避免与按问题裁剪的 JSON 重复且诱发加戏。"""
-    marker = "### Vehicle State Snapshot"
+    marker = "### 车辆状态快照"
     if marker not in (user_context or ""):
         return user_context or ""
     head, rest = user_context.split(marker, 1)
@@ -335,6 +345,91 @@ def format_climate_status(st: Dict[str, Any], active_seat: str = "front_left") -
     return "\n".join(lines)
 
 
+def spoken_vehicle_status(
+    st: Dict[str, Any],
+    query: str,
+    active_seat: str = "front_left",
+) -> str:
+    """LLM 不可用时，用车况快照直接出口语，不含报错原文。"""
+    from app.nlu.seat_context import SEAT_CN, normalize_active_seat
+
+    q = (query or "").strip()
+    about_climate = any(k in q for k in ("空调", "温度", "制冷", "制热", "风量", "循环"))
+    about_nav = any(
+        k in q
+        for k in (
+            "导航",
+            "在哪",
+            "位置",
+            "到哪",
+            "目的地",
+            "还要多久",
+            "还差",
+            "多久",
+            "几分钟",
+            "几公里",
+            "多远",
+            "剩余",
+            "到达",
+            "路况",
+            "还有多",
+        )
+    )
+    about_lights = any(k in q for k in ("氛围灯", "阅读灯", "顶灯", "灯光", "氛围", "车灯"))
+    seat = normalize_active_seat(active_seat)
+
+    if about_nav:
+        nav = st.get("navigation") or {}
+        pos = nav.get("position") or {}
+        place = str(pos.get("name") or "").strip()
+        if nav.get("navigating"):
+            dest = str(nav.get("destination") or "目的地").strip() or "目的地"
+            remain = nav.get("remaining_m")
+            remain_s = ""
+            if isinstance(remain, (int, float)):
+                remain_s = (
+                    f"，还剩约 {remain / 1000:.1f} 公里"
+                    if remain >= 1000
+                    else f"，还剩约 {int(remain)} 米"
+                )
+            if place:
+                return f"【听】你现在在{place}，正往{dest}开{remain_s}。"
+            return f"【听】导航已开，正往{dest}开{remain_s}。"
+        if place:
+            return f"【听】你现在在{place}，导航没开。"
+        return "【听】定位我这边读到了，但路名暂时空着。"
+
+    if about_climate:
+        climate = st.get("climate") or {}
+        zones = climate.get("zones") or {}
+        node = zones.get(seat) or {}
+        power = "开着" if climate.get("power") else "关着"
+        seat_cn = SEAT_CN.get(seat, seat)
+        temp = node.get("temp")
+        if isinstance(temp, (int, float)):
+            return f"【听】空调现在{power}，{seat_cn}这边大约 {temp:.0f} 度。"
+        return f"【听】空调现在{power}。"
+
+    if about_lights:
+        lights = ((st.get("cabin") or {}).get("lights") or {})
+        labels = {
+            "ambient": "氛围灯",
+            "dome": "顶灯",
+            "reading_left": "左阅读灯",
+            "reading_right": "右阅读灯",
+        }
+        on = [labels[k] for k in labels if (lights.get(k) or {}).get("enable")]
+        if on:
+            return f"【听】现在开着的是{'、'.join(on)}。"
+        return "【听】车内这几盏灯现在都关着。"
+
+    nav = st.get("navigation") or {}
+    place = str(((nav.get("position") or {}).get("name") or "")).strip()
+    if place:
+        return f"【听】我刚从车上读到：当前位置是{place}。"
+    return ""
+
+
 def format_lights_status(st: Dict[str, Any]) -> str:
     """可读灯光一览，供 SEARCH 优先引用。"""
     lights = ((st.get("cabin") or {}).get("lights") or {})
@@ -363,4 +458,50 @@ def format_lights_status(st: Dict[str, Any]) -> str:
     for k in ("ambient", "dome", "reading_left", "reading_right"):
         lines.append(f"- {_one(k)}")
     return "\n".join(lines)
+
+
+def bundle_view_sections(bundle: ContextBundle) -> List[Dict[str, Any]]:
+    """给执行轨迹页拆成可读块；车况 JSON 仅在展示时格式化。"""
+    sections: List[Dict[str, Any]] = []
+    system = (bundle.system or "").strip()
+    if system:
+        sections.append({"id": "system", "title": "系统人设", "chars": len(system), "text": system})
+
+    raw = (bundle.user_context or "").strip()
+    if raw:
+        for block in re.split(r"\n(?=### )", raw):
+            block = block.strip()
+            if not block.startswith("### "):
+                continue
+            first, _, rest = block.partition("\n")
+            heading = first[4:].strip()
+            body = rest.strip()
+            title = heading.split("(")[0].strip() or heading
+            if title.startswith("车辆状态快照"):
+                body = _pretty_json_block(body)
+            if not body:
+                continue
+            sec_id = {
+                "项目约定": "cabin",
+                "用户记忆": "memory",
+                "结构化偏好": "preferences",
+                "车辆状态快照": "vehicle",
+                "压缩摘要": "compaction",
+                "附加材料": "extra",
+            }.get(title, title)
+            sections.append({"id": sec_id, "title": title, "chars": len(body), "text": body})
+
+    dialog = (bundle.recent_dialog or "").strip()
+    if dialog:
+        sections.append(
+            {"id": "recent_dialog", "title": "最近对话", "chars": len(dialog), "text": dialog}
+        )
+    return sections
+
+
+def _pretty_json_block(text: str) -> str:
+    try:
+        return json.dumps(json.loads(text), ensure_ascii=False, indent=2)
+    except Exception:
+        return text
 

@@ -50,8 +50,8 @@ export function PresetQuestionsButton({
   }, [tab]);
 
   const pick = (q: PresetQuestion) => {
-    setOpen(false);
     onPick(q.text);
+    setOpen(false);
   };
 
   return (
@@ -88,7 +88,7 @@ export function PresetQuestionsButton({
             >
               <header className="preset-sheet-head">
                 <div>
-                  <p className="preset-eyebrow">可以这样问小特</p>
+                  <p className="preset-eyebrow">点选填入输入框，侧栏自动收起</p>
                   <h3>输入示例</h3>
                 </div>
                 <button type="button" className="preset-close" onClick={() => setOpen(false)} aria-label="关闭">
@@ -130,7 +130,7 @@ export function PresetQuestionsButton({
                             <span className="preset-idx">{String(i + 1).padStart(2, "0")}</span>
                             <span className="preset-q">{q.text}</span>
                             <span className="preset-go" aria-hidden>
-                              发送
+                              选用
                             </span>
                           </button>
                         </li>

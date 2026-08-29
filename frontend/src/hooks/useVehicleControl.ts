@@ -38,17 +38,54 @@ export function useVehicleControl() {
     [setVehicle],
   );
 
+  /** 滑条跟手：同工具只保留最新参数，不占全局 busy，避免拖动被丢掉 */
+  const liveInflight = useRef(new Set<string>());
+  const livePending = useRef(new Map<string, Record<string, unknown>>());
+
+  const pumpLive = useCallback(
+    async (tool: string) => {
+      if (!sessionId || liveInflight.current.has(tool)) return;
+      liveInflight.current.add(tool);
+      try {
+        while (livePending.current.has(tool)) {
+          const args = livePending.current.get(tool)!;
+          livePending.current.delete(tool);
+          try {
+            const res = await executeControl(tool, args, sessionId);
+            if (!res.ok) {
+              setError(res.message || res.error || "操作失败");
+            } else {
+              applyState(res.state);
+              setError(null);
+            }
+          } catch (e) {
+            setError(e instanceof Error ? e.message : "控车失败");
+          }
+        }
+      } finally {
+        liveInflight.current.delete(tool);
+        if (livePending.current.has(tool)) void pumpLive(tool);
+      }
+    },
+    [applyState, sessionId, setError],
+  );
+
   const run = useCallback(
     async (
       tool: string,
       args: Record<string, unknown> = {},
-      opts?: { confirmHigh?: boolean; label?: string },
+      opts?: { confirmHigh?: boolean; label?: string; live?: boolean },
     ): Promise<ControlResult | null> => {
-      if (busyRef.current) return null;
       if (!sessionId) {
         setError("请先登录昵称");
         return null;
       }
+      if (opts?.live) {
+        livePending.current.set(tool, args);
+        void pumpLive(tool);
+        return null;
+      }
+      if (busyRef.current) return null;
       if (opts?.confirmHigh) {
         const ok = await askHmiConfirm(
           opts.label || "该操作涉及车辆安全，确认执行？",
@@ -77,21 +114,33 @@ export function useVehicleControl() {
         setPendingLabel(null);
       }
     },
-    [applyState, sessionId, setError],
+    [applyState, pumpLive, sessionId, setError],
   );
 
-  const tick = useCallback(async () => {
-    if (!sessionId) return;
+  const tickInflight = useRef(false);
+  const lastTickAt = useRef(0);
+
+  const tick = useCallback(async (signal?: AbortSignal) => {
+    if (!sessionId || tickInflight.current || signal?.aborted) return;
     const store = useCabinStore.getState();
     if (store.resetInFlight) return;
+    const now = performance.now();
+    const dt = lastTickAt.current
+      ? Math.min(1, Math.max(0.08, (now - lastTickAt.current) / 1000))
+      : 0.25;
+    lastTickAt.current = now;
+    tickInflight.current = true;
     const epoch = store.vehicleEpoch;
     try {
-      const res = await tickDynamics(sessionId, 0.25);
-      const now = useCabinStore.getState();
-      if (now.resetInFlight || now.vehicleEpoch !== epoch) return;
+      const res = await tickDynamics(sessionId, dt, signal);
+      const after = useCabinStore.getState();
+      if (after.resetInFlight || after.vehicleEpoch !== epoch) return;
       applyState(res.state);
-    } catch {
+    } catch (e) {
+      if (e instanceof DOMException && e.name === "AbortError") return;
       /* 静默：后端未重启时不刷屏 */
+    } finally {
+      tickInflight.current = false;
     }
   }, [applyState, sessionId]);
 

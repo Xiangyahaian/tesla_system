@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Type
 
@@ -51,9 +52,12 @@ class ToolRegistry:
             )
         return schemas
 
-    def prompt_catalog(self) -> str:
+    def prompt_catalog(self, domains: Optional[List[str]] = None) -> str:
+        want = {d.strip().lower() for d in (domains or []) if d and str(d).strip()}
         lines = []
         for spec in self._tools.values():
+            if want and (spec.domain or "general").lower() not in want:
+                continue
             schema = spec.args_model.model_json_schema()
             props = schema.get("properties", {})
             required = schema.get("required", [])
@@ -66,31 +70,72 @@ class ToolRegistry:
                 f"- {spec.name} [{spec.risk.value}/{spec.domain}]: {spec.description}\n"
                 f"  参数: {', '.join(arg_bits) if arg_bits else '无'}"
             )
+        if want and not lines:
+            return self.prompt_catalog(None)
         return "\n".join(lines)
+
+    @staticmethod
+    def _validation_hint(errors: List[Dict[str, Any]]) -> str:
+        bits: List[str] = []
+        for err in errors[:4]:
+            loc = ".".join(str(x) for x in (err.get("loc") or ()) if x != "body")
+            msg = str(err.get("msg") or "无效")
+            bits.append(f"{loc or '参数'}: {msg}" if loc else msg)
+        return "；".join(bits) if bits else "参数不符合工具约定"
 
     def execute(self, gateway: VehicleGateway, call: ToolCall) -> ToolResult:
         spec = self._tools.get(call.name)
         if not spec:
-            return ToolResult(success=False, message=f"未知工具: {call.name}", tool=call.name)
+            return ToolResult(
+                success=False,
+                message=f"未知工具: {call.name}",
+                tool=call.name,
+                data={"retryable": False, "error_kind": "unknown_tool"},
+            )
         try:
             args = spec.args_model(**(call.arguments or {}))
         except ValidationError as e:
+            errs = e.errors()
+            hint = self._validation_hint(errs)
             return ToolResult(
                 success=False,
-                message=f"参数校验失败: {e.errors()[0].get('msg', str(e))}",
+                message=f"参数校验失败: {hint}",
                 tool=call.name,
-                data={"errors": e.errors()},
+                data={
+                    "errors": errs,
+                    "retryable": True,
+                    "error_kind": "validation",
+                    "correction_hint": (
+                        f"请改用合法参数重试 {call.name}。"
+                        f"问题：{hint}。原参数：{json.dumps(call.arguments or {}, ensure_ascii=False)[:240]}"
+                    ),
+                },
             )
         try:
             raw = spec.handler(gateway, args)
+            data = dict(raw.get("data") or {})
+            ok = bool(raw.get("success", False))
+            if not ok and "retryable" not in data:
+                # 业务失败默认可让规划层换策略；歧义澄清不算失败重试
+                data.setdefault("retryable", True)
+                data.setdefault("error_kind", "business")
             return ToolResult(
-                success=bool(raw.get("success", False)),
+                success=ok,
                 message=str(raw.get("message", "")),
-                data=raw.get("data") or {},
+                data=data,
                 tool=call.name,
             )
         except Exception as e:
-            return ToolResult(success=False, message=f"执行失败: {e}", tool=call.name)
+            return ToolResult(
+                success=False,
+                message="这步没做成，换个说法再试就行。",
+                tool=call.name,
+                data={
+                    "retryable": True,
+                    "error_kind": "exception",
+                    "error": str(e)[:1200],
+                },
+            )
 
 
 _REGISTRY: Optional[ToolRegistry] = None

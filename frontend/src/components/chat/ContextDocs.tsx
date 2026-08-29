@@ -1,6 +1,30 @@
 import { useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { contextSourceLabel, type RetrievedDoc } from "@/lib/answer";
+import { contextSourceLabel, type RetrievedDoc, type RetrievedImage } from "@/lib/answer";
+
+export function ManualImageRow({
+  images,
+  compact = false,
+}: {
+  images: RetrievedImage[];
+  compact?: boolean;
+}) {
+  if (!images.length) return null;
+  return (
+    <div className={`image-row${compact ? " compact" : ""}`}>
+      {images.map((img) => (
+        <figure key={img.image_path} className="image-card">
+          <img
+            src={`/api/image?path=${encodeURIComponent(img.image_path)}`}
+            alt={img.title || "手册图"}
+            loading="lazy"
+          />
+          {img.title ? <figcaption>{img.title}</figcaption> : null}
+        </figure>
+      ))}
+    </div>
+  );
+}
 
 export function ContextDocs({
   docs,
@@ -20,12 +44,17 @@ export function ContextDocs({
       <div className="context-docs-list">
         {docs.map((d) => {
           const open = openId === d.index;
-          const meta =
+          const imgN = d.images?.length ?? 0;
+          const metaBits = [
             d.kind === "amap_poi"
               ? "地点"
-              : d.page != null && d.page !== ""
-                ? `第 ${d.page} 页`
-                : src.meta;
+              : d.kind === "web"
+                ? "网页"
+                : d.page != null && d.page !== ""
+                  ? `第 ${d.page} 页`
+                  : src.meta,
+            imgN ? `${imgN} 张图` : "",
+          ].filter(Boolean);
           return (
             <div key={d.index} className={`context-doc${open ? " open" : ""}`}>
               <button
@@ -40,7 +69,7 @@ export function ContextDocs({
                   <span className="context-doc-preview">{d.preview || d.content.slice(0, 100)}</span>
                 </span>
                 <span className="context-doc-meta">
-                  {meta}
+                  {metaBits.join(" · ")}
                   <i className={open ? "up" : ""} />
                 </span>
               </button>
@@ -54,6 +83,14 @@ export function ContextDocs({
                     transition={{ duration: 0.28, ease: [0.22, 1, 0.36, 1] }}
                   >
                     <pre>{d.content}</pre>
+                    {d.url ? (
+                      <p className="context-doc-link">
+                        <a href={d.url} target="_blank" rel="noreferrer">
+                          打开原文
+                        </a>
+                      </p>
+                    ) : null}
+                    {d.images?.length ? <ManualImageRow images={d.images} compact /> : null}
                   </motion.div>
                 ) : null}
               </AnimatePresence>

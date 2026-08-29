@@ -1,17 +1,19 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useLocation } from "react-router-dom";
 import { AnimatePresence, motion } from "framer-motion";
 import {
-  AgentTurnSummary,
   compactAgent,
-  fetchAgentContext,
   fetchAgentHistory,
   fetchAgentTurn,
+  type AgentTurnMetrics,
+  type AgentTurnSummary,
 } from "@/lib/api";
 import { useCabinStore } from "@/store/cabinStore";
 import { TopBar } from "@/components/layout/TopBar";
+import { PromptCalls } from "@/components/agent/PromptCalls";
 import { TurnRail } from "@/components/agent/TurnRail";
 import type { TraceStep } from "@/lib/types";
-import { intentLabel, statusLabel, toShowcaseSteps } from "@/lib/trace";
+import { intentLabel, statusLabel, toShowcaseSteps, formatElapsed } from "@/lib/trace";
 
 function formatTime(ts?: number) {
   if (!ts) return "";
@@ -26,40 +28,58 @@ function formatTime(ts?: number) {
   });
 }
 
+function readMetrics(raw: unknown): AgentTurnMetrics {
+  if (!raw || typeof raw !== "object") return {};
+  return raw as AgentTurnMetrics;
+}
+
+function tokenSourceLabel(src?: string) {
+  if (src === "api") return "接口返回";
+  if (src === "estimate") return "估算（接口未给 usage）";
+  if (src === "mixed") return "混合（部分接口返回、部分估算）";
+  return "";
+}
+
+function turnListHint(t: AgentTurnSummary) {
+  const m = t.metrics || {};
+  const elapsed = formatElapsed(t.duration_ms);
+  if (typeof m.llm_used === "boolean") {
+    if (!m.llm_used) return elapsed ? `未调模型 · ${elapsed}` : "未调模型";
+    const tok = Number(m.total_tokens || 0);
+    const bits = [tok ? `${tok} token` : "", elapsed].filter(Boolean);
+    return bits.length ? bits.join(" · ") : null;
+  }
+  return t.tool_names?.length ? `${t.tool_names.length} 个工具` : elapsed || null;
+}
+
 export function AgentPage() {
+  const loc = useLocation();
   const sessionId = useCabinStore((s) => s.sessionId);
   const model = useCabinStore((s) => s.model);
-  const agentMeta = useCabinStore((s) => s.agentMeta);
   const [turns, setTurns] = useState<AgentTurnSummary[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [selected, setSelected] = useState<Record<string, unknown> | null>(null);
   const [rawOpen, setRawOpen] = useState(false);
-  const [context, setContext] = useState<{
-    sources: string[];
-    total_chars: number;
-    recent_dialog: string;
-    user_context_preview: string;
-  } | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [loading, setLoading] = useState(true);
 
   const reload = useCallback(async () => {
     try {
       setErr(null);
-      const [h, c] = await Promise.all([
-        fetchAgentHistory(sessionId, 50),
-        fetchAgentContext(sessionId),
-      ]);
+      const h = await fetchAgentHistory(sessionId, 50);
       setTurns(h.turns || []);
-      setContext(c);
     } catch (e) {
       setErr(e instanceof Error ? e.message : "加载失败");
+    } finally {
+      setLoading(false);
     }
   }, [sessionId]);
 
   useEffect(() => {
+    if (loc.pathname !== "/agent") return;
     void reload();
-  }, [reload]);
+  }, [loc.pathname, reload]);
 
   const openTurn = async (turn: AgentTurnSummary) => {
     const id = String(turn.turn_id || turn.id || "");
@@ -96,10 +116,22 @@ export function AgentPage() {
   const intent = String(selected?.intent || "");
   const status = String(selected?.status || "");
   const answer = String(selected?.answer_preview || "");
+  const metrics = useMemo(() => readMetrics(selected?.metrics), [selected]);
+  const prompts = Array.isArray(metrics.prompts) ? metrics.prompts : [];
+  const recorded = typeof metrics.llm_used === "boolean";
+  const endedAt = Number(selected?.ended_at) || undefined;
+  const startedAt = Number(selected?.started_at) || undefined;
+  const turnMs =
+    startedAt && endedAt && endedAt >= startedAt
+      ? Math.round((endedAt - startedAt) * 1000)
+      : typeof selected?.duration_ms === "number"
+        ? Number(selected.duration_ms)
+        : undefined;
+  const consumeLabel = formatElapsed(turnMs ?? metrics.llm_elapsed_ms);
 
   return (
     <div className="page-agent">
-      <TopBar title="执行轨迹" subtitle="按回合查看意图、工具与回复，一眼看清 Agent 做了什么" />
+      <TopBar title="执行轨迹" subtitle="点开一轮，只看这一轮真实送给模型的内容、字数和 token" />
       <div className="agent-body">
         <aside className="agent-list">
           <div className="agent-list-head">
@@ -124,12 +156,8 @@ export function AgentPage() {
               const id = String(t.turn_id || t.id || i);
               const q = t.query || t.user_query || "—";
               const active = selectedId === id;
-              const meta = [
-                formatTime(t.started_at) || id.slice(0, 8),
-                t.tool_names?.length ? `${t.tool_names.length} 个工具` : null,
-              ]
-                .filter(Boolean)
-                .join(" · ");
+              const hint = turnListHint(t);
+              const meta = [formatTime(t.started_at) || id.slice(0, 8), hint].filter(Boolean).join(" · ");
               return (
                 <li key={id}>
                   <button
@@ -148,34 +176,15 @@ export function AgentPage() {
                 </li>
               );
             })}
-            {turns.length === 0 ? (
+            {loading ? (
+              <li className="empty-hint">正在加载轨迹…</li>
+            ) : turns.length === 0 ? (
               <li className="empty-hint">尚无轨迹，先在「驾驶助手」对话一轮。</li>
             ) : null}
           </ul>
         </aside>
 
         <section className="agent-detail">
-          <div className="agent-meta-grid">
-            <div className="meta-tile">
-              <div className="hud-label">对话条数</div>
-              <div className="hud-value">
-                {agentMeta?.transcript_messages ?? "—"}
-                <small> 条</small>
-              </div>
-            </div>
-            <div className="meta-tile">
-              <div className="hud-label">字符数</div>
-              <div className="hud-value">{agentMeta?.transcript_chars ?? "—"}</div>
-            </div>
-            <div className="meta-tile">
-              <div className="hud-label">上下文</div>
-              <div className="hud-value">
-                {context?.total_chars ?? "—"}
-                <small> 字</small>
-              </div>
-            </div>
-          </div>
-
           {selected ? (
             <div className="turn-detail-panel">
               <header className="turn-detail-head">
@@ -188,9 +197,59 @@ export function AgentPage() {
                   <span className={`trace-pill tone-${(status || "ok").toLowerCase()}`}>
                     {statusLabel(status)}
                   </span>
-                  <span className="trace-pill mute">{showcase.length} 步</span>
                 </div>
               </header>
+
+              <div className="agent-meta-grid">
+                <div className="meta-tile">
+                  <div className="hud-label">步骤数</div>
+                  <div className="hud-value">
+                    {showcase.length}
+                    <small> 步</small>
+                  </div>
+                </div>
+                <div className="meta-tile">
+                  <div className="hud-label">送入模型</div>
+                  <div className="hud-value">
+                    {recorded ? metrics.prompt_chars ?? 0 : "—"}
+                    <small> 字</small>
+                  </div>
+                </div>
+                <div className="meta-tile">
+                  <div className="hud-label">Token</div>
+                  <div className="hud-value">
+                    {recorded ? metrics.total_tokens ?? 0 : "—"}
+                    <small>
+                      {recorded && metrics.llm_used
+                        ? ` 入 ${metrics.prompt_tokens ?? 0} / 出 ${metrics.completion_tokens ?? 0}`
+                        : ""}
+                    </small>
+                  </div>
+                </div>
+                <div className="meta-tile">
+                  <div className="hud-label">响应时间</div>
+                  <div className="hud-value">
+                    {consumeLabel || "—"}
+                    <small> 提问到回答</small>
+                  </div>
+                </div>
+              </div>
+              {recorded && metrics.token_source && metrics.llm_used ? (
+                <p className="turn-metric-note">
+                  Token 来源：{tokenSourceLabel(metrics.token_source) || metrics.token_source}
+                  {metrics.llm_calls ? ` · 本轮调用 ${metrics.llm_calls} 次` : ""}
+                </p>
+              ) : null}
+              {recorded && !metrics.llm_used ? (
+                <p className="turn-metric-note">
+                  这一轮没有调用大模型，所以没有送入字符，也没有 token。下面不会再展示会话级的人设/记忆拼装。
+                </p>
+              ) : null}
+              {!recorded ? (
+                <p className="turn-metric-note">
+                  这是改版前记下的回合：当时没有保存真正送进模型的原文和 token，这里也不再用「当前会话组装结果」冒充。
+                </p>
+              ) : null}
 
               {answer ? (
                 <div className="turn-answer-card">
@@ -202,11 +261,13 @@ export function AgentPage() {
               <div className="turn-process">
                 <div className="turn-process-label">执行过程</div>
                 {showcase.length > 0 ? (
-                  <TurnRail steps={steps} />
+                  <TurnRail steps={steps} endedAt={endedAt} />
                 ) : (
                   <p className="empty-hint soft">本轮没有可展示的关键步骤。</p>
                 )}
               </div>
+
+              <PromptCalls recorded={recorded} llmUsed={metrics.llm_used} prompts={prompts} />
 
               <div className="turn-raw">
                 <button
@@ -236,16 +297,9 @@ export function AgentPage() {
           ) : (
             <div className="empty-panel">
               <h3>选择左侧一轮对话</h3>
-              <p>右侧会按「意图 → 工具/检索 → 回复」展示可读的执行过程。</p>
+              <p>右侧只展示这一轮的步骤、送入字数和 token，不再显示整段会话的总量。</p>
             </div>
           )}
-
-          {context?.user_context_preview ? (
-            <div className="context-preview">
-              <div className="context-title">当前上下文预览</div>
-              <pre className="code-block soft">{context.user_context_preview}</pre>
-            </div>
-          ) : null}
         </section>
       </div>
     </div>

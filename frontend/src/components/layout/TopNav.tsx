@@ -9,22 +9,12 @@ const LINKS = [
   { to: "/settings", label: "系统设置" },
 ] as const;
 
-const PHASE_CN: Record<string, string> = {
-  idle: "待命",
-  listening: "聆听中",
-  thinking: "理解中",
-  acting: "执行中",
-  speaking: "播报中",
-};
-
 /** Motionsites Securify–style pill chrome on the original cabin nav. */
 export function TopNav() {
-  const phase = useCabinStore((s) => s.phase);
-  const vehicle = useCabinStore((s) => s.vehicle);
   const userNickname = useCabinStore((s) => s.userNickname);
   const clearUser = useCabinStore((s) => s.clearUser);
-  const gear = vehicle?.dynamics?.gear || "P";
-  const speed = vehicle?.dynamics?.speed_kmh;
+  const atmosphereEnabled = useCabinStore((s) => s.atmosphereEnabled);
+  const setAtmosphereEnabled = useCabinStore((s) => s.setAtmosphereEnabled);
 
   return (
     <motion.header
@@ -59,9 +49,19 @@ export function TopNav() {
         <button type="button" className="nav-switch-user" onClick={() => clearUser()}>
           切换用户
         </button>
-        <span className="nav-pill">{gear} 挡</span>
-        <span className="nav-pill">{speed != null ? `${Math.round(speed)} km/h` : "0 km/h"}</span>
-        <span className={`nav-phase phase-${phase}`}>{PHASE_CN[phase] || phase}</span>
+        <button
+          type="button"
+          className={`nav-atmosphere${atmosphereEnabled ? " on" : ""}`}
+          aria-pressed={atmosphereEnabled}
+          aria-label={atmosphereEnabled ? "关闭道路背景" : "开启道路背景"}
+          title={atmosphereEnabled ? "关闭道路背景" : "开启道路背景"}
+          onClick={() => setAtmosphereEnabled(!atmosphereEnabled)}
+        >
+          <span className="nav-atmosphere-copy">背景</span>
+          <span className="nav-atmosphere-switch" aria-hidden>
+            <i />
+          </span>
+        </button>
       </div>
     </motion.header>
   );

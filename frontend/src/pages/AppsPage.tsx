@@ -22,6 +22,7 @@ export function AppsPage() {
   const [categories, setCategories] = useState<string[]>([]);
   const [filter, setFilter] = useState<string>("all");
   const [err, setErr] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
   const { runQuery } = useCabinRuntime();
   const busy = useCabinStore((s) => s.busy);
   const active = useCabinStore((s) => s.vehicle?.apps?.active);
@@ -34,6 +35,8 @@ export function AppsPage() {
         setCategories(data.categories);
       } catch (e) {
         setErr(e instanceof Error ? e.message : "加载失败");
+      } finally {
+        setLoading(false);
       }
     })();
   }, []);
@@ -67,6 +70,8 @@ export function AppsPage() {
           ))}
         </div>
         {err ? <p className="page-error">{err}</p> : null}
+        {loading ? <p className="empty-hint">正在加载应用…</p> : null}
+        {busy ? <p className="empty-hint">助手正在执行驾驶页指令，应用可浏览，完成前暂不能点开。</p> : null}
         <div className="apps-grid">
           {visible.map((app, i) => {
             const isActive = active === app.name;

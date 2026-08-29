@@ -7,6 +7,8 @@ import {
   type LngLat,
 } from "@/lib/navMath";
 import { useCabinStore } from "@/store/cabinStore";
+import { PlaceSearchField } from "@/components/maps/PlaceSearchField";
+import type { PlaceSearchHit } from "@/lib/api";
 
 const QUICK_DESTS = ["中关村软件园", "五道口地铁站", "西单大悦城", "北京西站"];
 
@@ -61,8 +63,10 @@ function AmapNavPanelImpl({ open, onClose, onControl, busy }: Props) {
   const rafRef = useRef(0);
   const hudRef = useRef<HTMLDivElement | null>(null);
   const lastHudMs = useRef(0);
-  const lastCamMs = useRef(0);
   const lastCamPos = useRef<LngLat | null>(null);
+  const camPos = useRef<LngLat | null>(null);
+  const lastPassedMs = useRef(0);
+  const lastLoopTs = useRef(0);
   const lastKeyRef = useRef("");
 
   const mapEpoch = useCabinStore((s) => s.mapEpoch);
@@ -73,11 +77,17 @@ function AmapNavPanelImpl({ open, onClose, onControl, busy }: Props) {
   const [originInput, setOriginInput] = useState<string>("当前位置");
   const [destInput, setDestInput] = useState("");
   const [navigatingUi, setNavigatingUi] = useState(false);
+  const [useLiveOrigin, setUseLiveOrigin] = useState(true);
   const originFocusedRef = useRef(false);
+  const destFocusedRef = useRef(false);
+  const useLiveOriginRef = useRef(true);
   const cruiseFpRef = useRef("");
   const displayPos = useRef<LngLat | null>(null);
+  const sessionId = useCabinStore((s) => s.sessionId) || "default";
+  const livePlaceName = useCabinStore((s) => s.vehicle?.navigation?.position?.name) || "当前位置";
 
   followRef.current = follow;
+  useLiveOriginRef.current = useLiveOrigin;
 
   const markInteract = useCallback(() => {
     userInteracting.current = true;
@@ -121,7 +131,8 @@ function AmapNavPanelImpl({ open, onClose, onControl, busy }: Props) {
           center: origin,
           viewMode: "2D",
           mapStyle: "amap://styles/whitesmoke",
-          animateEnable: true,
+          // 关闭地图自带动画，避免与我们每帧 setCenter 打架导致红点抖
+          animateEnable: false,
           jogEnable: false,
           dragEnable: true,
           zoomEnable: true,
@@ -247,7 +258,9 @@ function AmapNavPanelImpl({ open, onClose, onControl, busy }: Props) {
     cruiseFpRef.current = "";
     lastKeyRef.current = "";
     lastCamPos.current = origin;
-    lastCamMs.current = 0;
+    camPos.current = origin;
+    lastPassedMs.current = 0;
+    lastLoopTs.current = 0;
     displayPos.current = origin;
     carRef.current?.setPosition(origin);
     startRef.current?.setPosition(origin);
@@ -283,6 +296,8 @@ function AmapNavPanelImpl({ open, onClose, onControl, busy }: Props) {
         /* ignore */
       }
       map.setCenter(center, true);
+      camPos.current = center;
+      lastCamPos.current = center;
       carRef.current?.setPosition(center);
     };
     const id = window.requestAnimationFrame(sync);
@@ -310,6 +325,11 @@ function AmapNavPanelImpl({ open, onClose, onControl, busy }: Props) {
       if (navigating !== lastNav) {
         lastNav = navigating;
         setNavigatingUi(navigating);
+        // 仅在结束导航时清空终点，避免状态推送把正在输入的搜索词抹掉
+        if (!navigating) {
+          setDestInput("");
+          setUseLiveOrigin(true);
+        }
       }
 
       // 仅「开启导航」时渲染路线与终点；走廊折线只在后台驱动定位，不画到地图上
@@ -339,8 +359,12 @@ function AmapNavPanelImpl({ open, onClose, onControl, busy }: Props) {
             }
           }
         }
-        if (nav?.origin_name) setOriginInput(String(nav.origin_name));
-        if (nav?.destination) setDestInput(String(nav.destination));
+        if (nav?.origin_name && !originFocusedRef.current) {
+          setOriginInput(String(nav.origin_name));
+        }
+        if (nav?.destination && !destFocusedRef.current) {
+          setDestInput(String(nav.destination));
+        }
       } else {
         if (lastKeyRef.current) {
           lastKeyRef.current = "";
@@ -360,6 +384,8 @@ function AmapNavPanelImpl({ open, onClose, onControl, busy }: Props) {
             const snap: LngLat =
               Number.isFinite(plng) && Number.isFinite(plat) ? [plng, plat] : poly[0];
             displayPos.current = snap;
+            camPos.current = snap;
+            lastCamPos.current = snap;
             carRef.current?.setPosition(snap);
             if (open && followRef.current) {
               mapRef.current?.setCenter(snap, true);
@@ -369,11 +395,10 @@ function AmapNavPanelImpl({ open, onClose, onControl, busy }: Props) {
           cruiseFpRef.current = "";
           reckonRef.current.clear();
         }
-        if (!navigating) setDestInput("");
       }
 
-      // 未开导航：起点跟随实时定位地名
-      if (!navigating && !originFocusedRef.current) {
+      // 未开导航且仍用「我的位置」：起点跟随实时定位地名
+      if (!navigating && !originFocusedRef.current && useLiveOriginRef.current) {
         const live = String(nav?.position?.name || "").trim();
         if (live) setOriginInput(live);
       }
@@ -397,62 +422,69 @@ function AmapNavPanelImpl({ open, onClose, onControl, busy }: Props) {
       const speed = Number(v?.dynamics?.speed_kmh || 0);
       const mode = String(nav?.mode || (nav?.navigating ? "navigating" : "cruising"));
 
-      let pos: LngLat | null = null;
+      const prevTs = lastLoopTs.current || now;
+      lastLoopTs.current = now;
+      const frameDt = Math.min(0.05, Math.max(0, (now - prevTs) / 1000));
+
+      let target: LngLat | null = null;
       const routePose = reckonRef.current.hasRoute ? reckonRef.current.step(now) : null;
       if (routePose) {
-        pos = routePose.pos;
-        displayPos.current = pos;
-        if (mode === "navigating" && nav?.origin?.lng != null && nav?.origin?.lat != null && passedRef.current) {
+        target = routePose.pos;
+        // 已驶过折线：节流更新，避免每帧 setPath 拖垮主线程
+        if (
+          mode === "navigating" &&
+          nav?.origin?.lng != null &&
+          nav?.origin?.lat != null &&
+          passedRef.current &&
+          now - lastPassedMs.current > 120
+        ) {
+          lastPassedMs.current = now;
+          const draw = displayPos.current || target;
           passedRef.current.setPath([
             [Number(nav.origin.lng), Number(nav.origin.lat)],
-            pos,
+            draw,
           ]);
         }
       } else {
         const lng = Number(nav?.position?.lng);
         const lat = Number(nav?.position?.lat);
         if (Number.isFinite(lng) && Number.isFinite(lat)) {
-          const target: LngLat = [lng, lat];
-          const cur = displayPos.current;
-          if (!cur) {
-            displayPos.current = target;
-            pos = target;
-          } else {
-            // 无折线时平滑贴合服务端定位
-            const next: LngLat = [
-              cur[0] + (target[0] - cur[0]) * 0.22,
-              cur[1] + (target[1] - cur[1]) * 0.22,
-            ];
-            displayPos.current = next;
-            pos = next;
-          }
+          target = [lng, lat];
+        }
+      }
+
+      // 统一平滑位姿：车标与镜头共用，避免相对抖动
+      let pos: LngLat | null = null;
+      if (target) {
+        const cur = displayPos.current;
+        if (!cur) {
+          displayPos.current = target;
+          pos = target;
+        } else {
+          const settle = followRef.current && !userInteracting.current ? 0.1 : 0.14;
+          const a = 1 - Math.exp(-frameDt / settle);
+          pos = [cur[0] + (target[0] - cur[0]) * a, cur[1] + (target[1] - cur[1]) * a];
+          displayPos.current = pos;
         }
       }
 
       if (pos && carRef.current) {
-        carRef.current.setPosition(pos);
-        if (mode === "navigating") startRef.current?.setPosition(pos);
+        const following = open && followRef.current && !userInteracting.current;
 
-        // 跟随镜头：节流 + 位移阈值，禁止每帧 immediately 硬贴（否则地图会狂抖）
-        if (open && followRef.current && !userInteracting.current && now - lastCamMs.current > 280) {
-          const prevCam = lastCamPos.current;
-          const movedEnough =
-            !prevCam ||
-            Math.abs(prevCam[0] - pos[0]) > 0.000035 ||
-            Math.abs(prevCam[1] - pos[1]) > 0.00003;
-          if (movedEnough) {
-            lastCamMs.current = now;
-            lastCamPos.current = pos;
-            try {
-              if (typeof mapRef.current?.panTo === "function") {
-                mapRef.current.panTo(pos);
-              } else {
-                mapRef.current?.setCenter(pos, false);
-              }
-            } catch {
-              mapRef.current?.setCenter(pos, false);
-            }
+        if (following) {
+          // 跟随时：镜头与红点锁同一坐标，屏幕上红点钉在视野中心不抖
+          camPos.current = pos;
+          lastCamPos.current = pos;
+          try {
+            mapRef.current?.setCenter(pos, true);
+          } catch {
+            /* ignore */
           }
+          carRef.current.setPosition(pos);
+          if (mode === "navigating") startRef.current?.setPosition(pos);
+        } else {
+          carRef.current.setPosition(pos);
+          if (mode === "navigating") startRef.current?.setPosition(pos);
         }
 
         if (now - lastHudMs.current > 400 && hudRef.current) {
@@ -467,7 +499,9 @@ function AmapNavPanelImpl({ open, onClose, onControl, busy }: Props) {
                 ? `已到达 · ${dest}`
                 : `前往 ${dest} · 剩余 ${remainKm} km · 约 ${eta ?? "--"} 分`;
           } else if (mode === "parked") {
-            hudRef.current.textContent = "驻车";
+            const dest = nav?.destination || nav?.position?.name || "";
+            hudRef.current.textContent =
+              nav?.arrived && dest ? `已到达 · ${dest}` : "驻车";
           } else if (mode === "navigating" && !!nav?.navigating) {
             hudRef.current.textContent = `导航中 · ${Math.round(speed)} km/h`;
           } else {
@@ -492,18 +526,41 @@ function AmapNavPanelImpl({ open, onClose, onControl, busy }: Props) {
     const destination = destInput.trim();
     if (!destination || destination === "未开启导航" || busy) return;
     const originRaw = originInput.trim();
-    const liveName = String(useCabinStore.getState().vehicle?.navigation?.position?.name || "").trim();
     const args: Record<string, unknown> = {
       destination,
       preference: "fastest",
     };
-    // 实时路名 /「当前位置」→ 从当前定位续航，不当作地理检索起点
-    if (originRaw && originRaw !== "当前位置" && originRaw !== liveName) {
+    // 「我的位置」/ 实时路名 → 从当前定位出发
+    if (!useLiveOrigin && originRaw && originRaw !== "当前位置" && originRaw !== livePlaceName) {
       args.origin = originRaw;
     }
     onControl("navigation.navigate_to", args, {
-      label: `导航：${originRaw || "当前位置"} → ${destination}`,
+      label: `导航：${useLiveOrigin ? "当前位置" : originRaw || "当前位置"} → ${destination}`,
     });
+  };
+
+  const swapEnds = () => {
+    if (navigatingUi || busy) return;
+    const nextOrigin = destInput.trim();
+    const nextDest = useLiveOrigin ? livePlaceName : originInput.trim();
+    setOriginInput(nextOrigin || livePlaceName);
+    setDestInput(nextDest === "当前位置" ? "" : nextDest);
+    setUseLiveOrigin(false);
+  };
+
+  const onPickOrigin = (hit: PlaceSearchHit | { name: string; kind: "my_location" }) => {
+    if ("kind" in hit && hit.kind === "my_location") {
+      setUseLiveOrigin(true);
+      setOriginInput(livePlaceName || "当前位置");
+      return;
+    }
+    setUseLiveOrigin(false);
+    setOriginInput(hit.name);
+  };
+
+  const onPickDest = (hit: PlaceSearchHit | { name: string; kind: "my_location" }) => {
+    if ("kind" in hit && hit.kind === "my_location") return;
+    setDestInput(hit.name);
   };
 
   const zoomBy = (delta: number) => {
@@ -523,8 +580,11 @@ function AmapNavPanelImpl({ open, onClose, onControl, busy }: Props) {
     const nav = useCabinStore.getState().vehicle?.navigation;
     const lng = Number(nav?.position?.lng ?? BIT_ORIGIN.lng);
     const lat = Number(nav?.position?.lat ?? BIT_ORIGIN.lat);
+    const center: LngLat = [lng, lat];
+    camPos.current = center;
+    lastCamPos.current = center;
     mapRef.current?.setZoom(17, true);
-    mapRef.current?.setCenter([lng, lat], true);
+    mapRef.current?.setCenter(center, true);
     setFollow(true);
   };
 
@@ -551,72 +611,77 @@ function AmapNavPanelImpl({ open, onClose, onControl, busy }: Props) {
           <strong ref={hudRef}>北京理工大学中关村校区南门</strong>
         </div>
         <div className="amap-head-actions">
-          {navigatingUi ? (
-            <button
-              type="button"
-              className="deck-inline-btn"
-              disabled={!!busy}
-              onClick={() => onControl("navigation.stop", {})}
-            >
-              结束导航
-            </button>
-          ) : null}
           <button type="button" className="deck-inline-btn" onClick={onClose}>
             收起地图
           </button>
         </div>
       </header>
 
-      <div className="amap-route-form">
-        <label>
-          <span>起</span>
-          <input
+      <div className="amap-route-bar">
+        <div className="amap-route-rail" aria-label="起终点">
+          <PlaceSearchField
+            kind="origin"
             value={originInput}
-            onChange={(e) => setOriginInput(e.target.value)}
-            onFocus={() => {
-              originFocusedRef.current = true;
-            }}
-            onBlur={() => {
-              originFocusedRef.current = false;
-            }}
-            placeholder="实时位置"
+            placeholder="搜索起点"
             disabled={!!busy || navigatingUi}
-          />
-        </label>
-        <label>
-          <span>终</span>
-          <input
-            value={destInput}
-            onChange={(e) => setDestInput(e.target.value)}
-            placeholder="未开启导航"
-            disabled={!!busy}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") {
-                e.preventDefault();
-                startNav();
-              }
+            sessionId={sessionId}
+            livePlaceName={livePlaceName}
+            allowMyLocation
+            onChange={(v) => {
+              setOriginInput(v);
+              setUseLiveOrigin(false);
+            }}
+            onPick={onPickOrigin}
+            onFocusChange={(f) => {
+              originFocusedRef.current = f;
             }}
           />
-        </label>
-        <div className="amap-route-actions">
           <button
             type="button"
-            className="deck-inline-btn primary"
-            disabled={!!busy || !destInput.trim()}
-            onClick={startNav}
+            className="amap-route-swap"
+            title="交换起终点"
+            aria-label="交换起终点"
+            disabled={!!busy || navigatingUi}
+            onClick={swapEnds}
           >
-            开始导航
+            <svg viewBox="0 0 24 24" aria-hidden>
+              <path d="M7 7h11M18 7l-3-3M18 7l-3 3M17 17H6M6 17l3-3M6 17l3 3" />
+            </svg>
           </button>
+          <PlaceSearchField
+            kind="dest"
+            value={destInput}
+            placeholder="搜索终点"
+            disabled={!!busy}
+            sessionId={sessionId}
+            onChange={setDestInput}
+            onPick={onPickDest}
+            onSubmit={startNav}
+            onFocusChange={(f) => {
+              destFocusedRef.current = f;
+            }}
+          />
+        </div>
+        <div className="amap-route-actions">
           {navigatingUi ? (
             <button
               type="button"
-              className="deck-inline-btn"
+              className="deck-inline-btn amap-go-btn"
               disabled={!!busy}
               onClick={() => onControl("navigation.stop", {})}
             >
-              结束
+              结束导航
             </button>
-          ) : null}
+          ) : (
+            <button
+              type="button"
+              className="deck-inline-btn primary amap-go-btn"
+              disabled={!!busy || !destInput.trim()}
+              onClick={startNav}
+            >
+              开始导航
+            </button>
+          )}
         </div>
       </div>
 
@@ -648,7 +713,22 @@ function AmapNavPanelImpl({ open, onClose, onControl, busy }: Props) {
             aria-label={follow ? "关闭跟随" : "开启跟随"}
             aria-pressed={follow}
             className={follow ? "on" : ""}
-            onClick={() => setFollow((v) => !v)}
+            onClick={() =>
+              setFollow((v) => {
+                const next = !v;
+                if (next) {
+                  const p = displayPos.current || liveSeed();
+                  camPos.current = p;
+                  lastCamPos.current = p;
+                  try {
+                    mapRef.current?.setCenter(p, true);
+                  } catch {
+                    /* ignore */
+                  }
+                }
+                return next;
+              })
+            }
           >
             <svg viewBox="0 0 24 24" aria-hidden>
               <path d="M12 3.5l6.5 16.2-6.5-3.4-6.5 3.4L12 3.5z" />
@@ -683,7 +763,12 @@ function AmapNavPanelImpl({ open, onClose, onControl, busy }: Props) {
                   destination: d,
                   preference: "fastest",
                 };
-                if (originRaw && originRaw !== "当前位置") {
+                if (
+                  !useLiveOrigin &&
+                  originRaw &&
+                  originRaw !== "当前位置" &&
+                  originRaw !== livePlaceName
+                ) {
                   args.origin = originRaw;
                 }
                 onControl("navigation.navigate_to", args, { label: `导航到${d}` });

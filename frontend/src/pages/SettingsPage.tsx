@@ -3,6 +3,7 @@ import { fetchModelStatus, fetchTools } from "@/lib/api";
 import { useCabinStore } from "@/store/cabinStore";
 import { TopBar } from "@/components/layout/TopBar";
 import { SessionManagerPanel } from "@/components/session/SessionManagerPanel";
+import { UserAdminPanel } from "@/components/admin/UserAdminPanel";
 import { ManualPreviewButton } from "@/components/drive/ManualPreviewButton";
 
 export function SettingsPage() {
@@ -12,9 +13,8 @@ export function SettingsPage() {
   const setTtsEnabled = useCabinStore((s) => s.setTtsEnabled);
   const ttsVolume = useCabinStore((s) => s.ttsVolume);
   const setTtsVolume = useCabinStore((s) => s.setTtsVolume);
-  const sessionId = useCabinStore((s) => s.sessionId);
-  const sessionTitle = useCabinStore((s) => s.sessionTitle);
   const userNickname = useCabinStore((s) => s.userNickname);
+  const isAdmin = useCabinStore((s) => s.isAdmin);
   const clearUser = useCabinStore((s) => s.clearUser);
   const [tools, setTools] = useState<
     { name: string; description: string; risk: string; domain: string }[]
@@ -24,9 +24,9 @@ export function SettingsPage() {
   useEffect(() => {
     void (async () => {
       try {
-        const [t, m] = await Promise.all([fetchTools(), fetchModelStatus()]);
-        setTools(t.tools || []);
-        setStatus(m);
+        const [t, m] = await Promise.allSettled([fetchTools(), fetchModelStatus()]);
+        if (t.status === "fulfilled") setTools(t.value.tools || []);
+        if (m.status === "fulfilled") setStatus(m.value);
       } catch {
         /* ignore offline */
       }
@@ -35,7 +35,7 @@ export function SettingsPage() {
 
   return (
     <div className="page-settings">
-      <TopBar title="系统设置" subtitle="会话管理、模型、语音播报与工具注册表" />
+      <TopBar title="系统设置" subtitle="管理自己的会话，以及模型、语音与工具" />
       <div className="settings-body">
         <section className="settings-card wide">
           <h3>用户</h3>
@@ -44,8 +44,16 @@ export function SettingsPage() {
             <code>{userNickname || "未登录"}</code>
           </div>
           <div className="settings-row">
+            <span>身份</span>
+            <em className={`settings-role${isAdmin ? " admin" : ""}`}>
+              {isAdmin ? "管理员" : "普通用户"}
+            </em>
+          </div>
+          <div className="settings-row settings-row-note">
             <span>独立记忆</span>
-            <span>每个昵称对应 SQLite 用户记录 + 独立 session / MEMORY.md</span>
+            <span>
+              每人独立管理人设、身份记忆与行为偏好。一轮答完后在后台抽取落盘，不挡住当轮说话；记忆按条目覆盖，偏好按字段合并。对话过长会摘要压缩，但不冲掉长期画像。
+            </span>
           </div>
           <div className="settings-row">
             <span>切换用户</span>
@@ -55,16 +63,15 @@ export function SettingsPage() {
           </div>
         </section>
 
-        <section className="settings-card wide">
-          <h3>会话管理（SQLite）</h3>
-          <div className="settings-row">
-            <span>当前会话</span>
-            <code>
-              {sessionTitle} · {sessionId}
-            </code>
-          </div>
-          <SessionManagerPanel />
+        <section className="settings-card wide session-card">
+          <SessionManagerPanel variant="page" />
         </section>
+
+        {isAdmin ? (
+          <section className="settings-card wide session-card">
+            <UserAdminPanel />
+          </section>
+        ) : null}
 
         <section className="settings-card">
           <h3>通用</h3>
@@ -123,6 +130,13 @@ export function SettingsPage() {
 
         <section className="settings-card">
           <h3>模型状态</h3>
+          {status?.local_available ? (
+            <p className="settings-hint">本地模型已连通 · {String(status.local_endpoint || "")}</p>
+          ) : (
+            <p className="settings-hint">
+              {String(status?.local_error || "本地模型未连通。选「本地模型」前请先在 GPU 电脑启动 vLLM。")}
+            </p>
+          )}
           <pre className="code-block soft">{JSON.stringify(status ?? { note: "暂无" }, null, 2)}</pre>
         </section>
 

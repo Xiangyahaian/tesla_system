@@ -122,8 +122,8 @@ class RadioControlArgs(BaseModel):
 
 
 class VolumeArgs(BaseModel):
-    volume: Optional[int] = Field(None, ge=0, le=100)
-    delta: Optional[int] = None
+    volume: Optional[int] = Field(None, ge=0, le=100, description="绝对音量 0-100；仅当用户说了具体数字时使用")
+    delta: Optional[int] = Field(None, description="相对变化：调小用负数如 -10，调大用正数如 +10；不要连续多次调用")
     muted: Optional[bool] = None
 
 
@@ -131,6 +131,9 @@ class NavigateArgs(BaseModel):
     destination: str
     preference: str = Field("fastest", description="fastest/shortest/eco")
     origin: Optional[str] = Field(None, description="起点，默认北京理工大学中关村校区南门")
+    destination_location: Optional[str] = Field(
+        None, description="目的地 GCJ-02 坐标 lng,lat；有则跳过歧义检索"
+    )
 
 
 class NearbySearchArgs(BaseModel):
@@ -185,6 +188,17 @@ class ListMessagesArgs(BaseModel):
 class MarkMessagesArgs(BaseModel):
     ids: Optional[List[str]] = Field(None, description="要标已读的消息 id 列表")
     all_unread: bool = Field(False, description="将全部未读标为已读")
+
+
+class WebSearchArgs(BaseModel):
+    query: str = Field(..., description="搜索关键词，保留用户原意；不要改成附近地点")
+    count: int = Field(5, ge=1, le=8, description="返回条数，默认 5")
+
+
+def _run_web_search(query: str, count: int = 5) -> dict:
+    from app.websearch import web_search
+
+    return web_search(query, count)
 
 
 def build_registry() -> ToolRegistry:
@@ -256,9 +270,13 @@ def build_registry() -> ToolRegistry:
 
     # nav / driving / apps
     add("navigation.navigate_to", "导航到目的地（高德 MCP/REST 真实路径）", NavigateArgs,
-        lambda gw, a: gw.navigate_to(a.destination, a.preference, a.origin), domain="navigation")
+        lambda gw, a: gw.navigate_to(
+            a.destination, a.preference, a.origin, getattr(a, "destination_location", None)
+        ), domain="navigation")
     add("navigation.start", "开始导航（同 navigate_to）", NavigateArgs,
-        lambda gw, a: gw.navigate_to(a.destination, a.preference, a.origin), domain="navigation")
+        lambda gw, a: gw.navigate_to(
+            a.destination, a.preference, a.origin, getattr(a, "destination_location", None)
+        ), domain="navigation")
     add("navigation.stop", "结束导航", EmptyArgs,
         lambda gw, a: gw.stop_navigation(), domain="navigation")
     add(
@@ -315,6 +333,16 @@ def build_registry() -> ToolRegistry:
         MarkMessagesArgs,
         lambda gw, a: gw.mark_messages_read(a.ids, a.all_unread),
         domain="notifications",
+    )
+    add(
+        "web.search",
+        "上网检索（新闻、攻略、评测、油价汇率比分、百科时事等）。"
+        "用户明说要搜网，或答案依赖互联网、不能靠车况/手册瞎编时调用。"
+        "query 写清检索主题（可结合对话上下文）。"
+        "车主手册用法、附近门店、导航请分别用 knowledge / maps.search_nearby / navigation，不要用本工具替代。",
+        WebSearchArgs,
+        lambda _gw, a: _run_web_search(a.query, a.count),
+        domain="web",
     )
 
     return reg

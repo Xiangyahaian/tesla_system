@@ -114,9 +114,9 @@ def synthesize_speech(
         # SSE 失败时回退一次非流式（仍用女声+情感，不换男声）
         if "SSE" in detail or e.code >= 400:
             return _synthesize_non_sse(clean, use_voice, format, instruction, speech_rate, emo)
-        raise RuntimeError(f"TTS 请求失败 HTTP {e.code}: {detail}") from e
+        raise RuntimeError("语音播报暂时不可用") from e
     except Exception as e:
-        raise RuntimeError(f"TTS 请求失败: {e}") from e
+        raise RuntimeError("语音播报暂时不可用") from e
 
     chunks = list(_iter_sse_audio_b64(raw))
     if chunks:
@@ -167,7 +167,7 @@ def _synthesize_non_sse(
         }
     url = (audio.get("url") or "").strip()
     if not url:
-        raise RuntimeError(f"TTS 未返回音频: {payload!r}")
+        raise RuntimeError("语音播报暂时不可用")
     with request.urlopen(url, timeout=12) as audio_resp:
         data = audio_resp.read()
     if not data:
@@ -297,8 +297,8 @@ def iter_synthesize_stream(
                     "mime": mime,
                     **meta,
                 }
-    except Exception as e:
-        yield {"type": "error", "error": str(e)}
+    except Exception:
+        yield {"type": "error", "error": "语音播报暂时不可用"}
         return
 
     yield {"type": "done"}

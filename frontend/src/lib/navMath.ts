@@ -56,7 +56,7 @@ export function advanceAlongArc(
   const b = pts[i];
   const pos: LngLat = [a[0] + (b[0] - a[0]) * ratio, a[1] + (b[1] - a[1]) * ratio];
   const heading = (Math.atan2(b[0] - a[0], b[1] - a[1]) * 180) / Math.PI;
-  return { pos, progress: target, remaining: Math.max(0, total - target), heading };
+  return { pos, progress: target, remaining: Math.max(0, total - target), heading: (heading + 360) % 360 };
 }
 
 /**
@@ -70,7 +70,7 @@ export class RouteDeadReckoner {
   private speedMps = 0;
   private lastTs = 0;
   /** 向 server 收敛时间常数（秒）——略大更稳，少抖 */
-  private tau = 0.85;
+  private tau = 1.35;
 
   setRoute(pts: LngLat[], progressM = 0) {
     this.table = pts.length ? buildArcTable(pts) : null;
@@ -111,20 +111,26 @@ export class RouteDeadReckoner {
   } | null {
     if (!this.table) return null;
     if (!this.lastTs) this.lastTs = now;
-    const dt = Math.min(0.05, Math.max(0, (now - this.lastTs) / 1000));
+    const dt = Math.min(0.1, Math.max(0, (now - this.lastTs) / 1000));
     this.lastTs = now;
 
     // 积分
     this.localProgress += this.speedMps * dt;
-    // 指数平滑拉向服务端（互补滤波）
-    const alpha = 1 - Math.exp(-dt / this.tau);
-    this.localProgress += (this.serverProgress - this.localProgress) * alpha;
+    // 误差很小时不硬拉，避免红点微抖；大误差再指数收敛
+    const err = this.serverProgress - this.localProgress;
+    if (Math.abs(err) > 0.8) {
+      const alpha = 1 - Math.exp(-dt / this.tau);
+      this.localProgress += err * alpha;
+    }
 
     const total = this.table.total;
     if (this.localProgress > total) this.localProgress = total;
     if (this.localProgress < 0) this.localProgress = 0;
 
-    return advanceAlongArc(this.table, this.localProgress);
+    const pose = advanceAlongArc(this.table, this.localProgress);
+    let heading = pose.heading;
+    if (this.speedMps < 0) heading = (heading + 180) % 360;
+    return { ...pose, heading };
   }
 
   get hasRoute() {

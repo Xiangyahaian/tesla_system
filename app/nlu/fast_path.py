@@ -5,28 +5,44 @@ from __future__ import annotations
 import re
 from typing import Optional, Tuple
 
+from app.gateway.apps_catalog import INSTALLED_APPS, normalize_app_name
 from app.models import IntentType, RouteResult, ToolCall
+from app.nlu.destination_guard import (
+    is_relative_or_category_destination,
+    should_skip_code_fast_path,
+)
 
 
 def try_confirm_utterance(query: str) -> Optional[RouteResult]:
     """座舱口头确认/取消（文本或语音），不是业务意图分类。"""
-    text = (query or "").strip().lower()
+    text = (query or "").strip().lower().rstrip("！!。.?？~～")
     if text in {
         "确认",
         "确定",
         "好的",
+        "好的呀",
+        "好呀",
+        "好啊",
         "好",
         "可以",
+        "可以的",
         "行",
+        "行啊",
         "执行",
         "是",
+        "是的",
         "嗯",
+        "嗯嗯",
         "读吧",
         "看着吧",
         "看一下",
+        "同意",
+        "没问题",
+        "继续",
         "yes",
         "y",
         "ok",
+        "okay",
     }:
         return RouteResult(intent=IntentType.CONFIRM, confidence=1.0, reason="用户确认")
     if text in {
@@ -38,10 +54,58 @@ def try_confirm_utterance(query: str) -> Optional[RouteResult]:
         "先别",
         "别读了",
         "不看了",
+        "别了",
+        "停",
+        "停下",
         "no",
         "n",
     }:
         return RouteResult(intent=IntentType.CANCEL, confidence=1.0, reason="用户取消")
+    return None
+
+
+def is_pending_hold_utterance(query: str) -> bool:
+    """短糊糊话：保留 pending，不要当成新指令覆盖。"""
+    raw = (query or "").strip().lower()
+    if not raw:
+        return True
+    if raw in {"嗯？", "啊？", "哦？", "什么？", "啥？", "？", "?", "…", "..."}:
+        return True
+    text = raw.rstrip("！!。.~～")
+    if not text:
+        return True
+    if len(text) <= 2 and text in {"啊", "哦", "噢", "额", "呃"}:
+        return True
+    return text in {"什么", "啥", "再说", "再说一遍", "什么意思"}
+
+
+def try_greeting_reply(query: str) -> Optional[str]:
+    """纯寒暄直接回，不进 NLU / 不灌车况。"""
+    text = (query or "").strip()
+    if not text or len(text) > 24:
+        return None
+    t = text.lower().rstrip("！!。.?？~～")
+    greetings = {
+        "你好",
+        "您好",
+        "嗨",
+        "哈喽",
+        "hello",
+        "hi",
+        "hey",
+        "在吗",
+        "在不在",
+        "你在吗",
+        "小特",
+        "小特你好",
+        "你好小特",
+        "早上好",
+        "中午好",
+        "下午好",
+        "晚上好",
+    }
+    if t in greetings or re.fullmatch(r"(小特[，,\s]*)?(你好|您好|在吗|嗨)", t):
+        return "【听】在呢，有事直接说就行。"
     return None
 
 
@@ -66,7 +130,8 @@ def _nearby_keywords(text: str) -> Optional[Tuple[str, str]]:
     for pat, kw, reason in rules:
         if re.search(pat, text):
             return kw, reason
-    if re.search(r"(附近|周边).*(有什么|有哪些|推荐)", text):
+    # 只接「附近/周边有什么」打听店，不接「去周边转转你推荐哪」这种陪聊
+    if re.search(r"(附近|周边|旁边).{0,8}(有什么|有哪些)", text):
         return "生活服务", "附近推荐"
     return None
 
@@ -94,40 +159,184 @@ def try_nearby_utterance(query: str) -> Optional[RouteResult]:
     )
 
 
-def try_nav_candidate_utterance(query: str, candidates: Optional[list] = None) -> Optional[RouteResult]:
-    """上一轮导航澄清后：用户说「第一个 / 去首钢园」→ 直接导航到候选。"""
+_WEB_CMD = re.compile(
+    r"^(?:请|麻烦|帮我|给我)?"
+    r"(?:在网上|网上|用百度|百度|谷歌|google)?"
+    r"(?:搜(?:索|一下|一搜|搜)?|查(?:一下|一查)?|百度一下)\s*(.+)$",
+    re.I,
+)
+_WEB_BAIDU = re.compile(r"^(?:请|麻烦|帮我|给我)?百度一下\s*(.+)$", re.I)
+_NEARBY_STEAL = re.compile(r"(附近|周边|旁边).{0,8}(餐厅|美食|充电|加油|停车|咖啡|酒店|厕所)")
+
+
+def extract_web_query(text: str) -> Optional[str]:
+    q = (text or "").strip()
+    if not q or len(q) > 80:
+        return None
+    q = re.sub(r"[吧啊呀哦呢嘛～~]+$", "", q).strip()
+    q = re.sub(r"[。.!！？?\s]+$", "", q).strip()
+    if looks_like_vehicle_knowledge(q):
+        return None
+    if looks_like_smalltalk(q):
+        return None
+    if _NEARBY_STEAL.search(q) or re.search(r"(搜|找|查).{0,4}(附近|周边)", q):
+        return None
+    m = _WEB_BAIDU.match(q) or _WEB_CMD.match(q)
+    if not m:
+        # 「今天有什么新闻 / 今日热点」也视为检索
+        if re.search(
+            r"(昨天|昨日|今天|今日|最近|本周|这一周|一周).{0,16}(新闻|热点|头条|大事)",
+            q,
+        ) or re.search(r"(总结|梳理).{0,16}(新闻|热点|大事)", q):
+            if not re.search(r"(附近|导航|手册|怎么用)", q):
+                return q
+        return None
+    rest = (m.group(1) or "").strip()
+    rest = re.sub(r"^(一下|下|这个|那个)\s*", "", rest).strip()
+    rest = re.sub(r"[。.!！？?\s]+$", "", rest).strip()
+    if not rest or len(rest) < 2:
+        return None
+    if re.match(r"^(附近|周边|旁边)", rest):
+        return None
+    if re.search(r"(电量|续航|胎压|音量|空调|温度|车窗|座椅|正在播|在听什么)", rest):
+        return None
+    return rest
+
+
+def try_web_search_utterance(query: str) -> Optional[RouteResult]:
+    """明确「搜一下 / 百度一下 / 网上查」直达网页搜索。"""
+    rest = extract_web_query(query)
+    if not rest:
+        return None
+    return RouteResult(
+        intent=IntentType.TOOL,
+        confidence=0.96,
+        reason="网页检索",
+        tool_calls=[
+            ToolCall(
+                name="web.search",
+                arguments={"query": rest, "count": 5},
+                reason="网页检索",
+            )
+        ],
+        done=True,
+    )
+
+
+_CHAT_WEB_TOPIC = re.compile(
+    r"(电影|影片|片子|片单|影讯|上映|院线|豆瓣|想看片|好看的片|电视剧|剧集|综艺)"
+)
+_CHAT_WEB_FOLLOW = re.compile(
+    r"(这个|这部|那部|刚才(?:说|提)的).{0,12}(电影|片子|片|剧)|"
+    r"(好看在哪|为什么好看|值不值得看|剧情怎么样|口碑怎么样|评分怎么样)"
+)
+
+
+def _recent_user_lines(recent: str, limit: int = 2) -> list[str]:
+    lines: list[str] = []
+    for m in re.finditer(r"(?:^|\n)(?:user|用户)[:：]\s*(.+)", recent or "", re.I):
+        t = (m.group(1) or "").strip()
+        if t:
+            lines.append(t)
+    return lines[-limit:]
+
+
+def chat_web_query(query: str, recent: str = "") -> Optional[str]:
+    """闲聊需要网上事实时给出检索词（电影推荐/追问「这个电影」等），否则 None。"""
+    q = (query or "").strip()
+    if not q or looks_like_vehicle_knowledge(q):
+        return None
+    if _NEARBY_STEAL.search(q) or re.search(r"(搜|找|查).{0,4}(附近|周边)", q):
+        return None
+    if re.search(r"(打开|关掉|关闭).{0,6}(空调|车窗|天窗|导航|音乐)", q):
+        return None
+    if _CHAT_WEB_FOLLOW.search(q):
+        prev = _recent_user_lines(recent)
+        blob = " ".join([*prev, q]).strip()
+        return (blob or q)[:80]
+    if _CHAT_WEB_TOPIC.search(q):
+        return q[:80]
+    return None
+
+
+def try_app_utterance(query: str) -> Optional[RouteResult]:
+    """打开/关闭已安装 App 直达，不经 NLU。"""
     text = (query or "").strip()
-    if not text or not candidates:
+    if not text or len(text) > 36:
         return None
-    cands = [c for c in candidates if isinstance(c, dict) and (c.get("name") or "").strip()]
-    if not cands:
+    m = re.search(r"(打开|开启|启动|关掉|关闭|退出)\s*(.+)$", text)
+    if not m:
         return None
+    action, raw = m.group(1), m.group(2).strip()
+    raw = re.sub(r"[吧啊呀哦呢嘛～~。.!！？?\s]+$", "", raw).strip()
+    raw = re.sub(r"^(一下|下|这个|那个)", "", raw).strip()
+    if not raw or re.search(r"(空调|天窗|车窗|导航|音乐|歌|电台|座椅|门|锁)", raw):
+        return None
+    enable = action in {"打开", "开启", "启动"}
+    # 长名优先，避免「音乐」吃掉「网易云音乐」
+    candidates: list[str] = []
+    for app in INSTALLED_APPS:
+        candidates.append(str(app["name"]))
+        for a in app.get("aliases") or []:
+            candidates.append(str(a))
+    candidates.sort(key=len, reverse=True)
+    hit = ""
+    low = raw.lower()
+    for c in candidates:
+        if low == c.lower() or low.startswith(c.lower()) or c.lower() in low:
+            hit = c
+            break
+    if not hit:
+        return None
+    name = normalize_app_name(hit)
+    verb = "打开" if enable else "关闭"
+    return RouteResult(
+        intent=IntentType.TOOL,
+        confidence=0.98,
+        reason=f"{verb}应用",
+        tool_calls=[
+            ToolCall(
+                name="apps.launch",
+                arguments={"app_name": name, "enable": enable},
+                reason=f"{verb}{name}",
+            )
+        ],
+        done=True,
+    )
 
-    picked = None
-    # 第 N 个 / 选 N / 只要数字
-    m = re.search(r"(?:第\s*)?([1-4一二三四])\s*(?:个|项|处|号)?", text)
-    if m or re.fullmatch(r"[1-4]", text):
-        raw = m.group(1) if m else text
-        idx_map = {"1": 1, "2": 2, "3": 3, "4": 4, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4}
-        n = idx_map.get(str(raw), 0)
-        if 1 <= n <= len(cands):
-            picked = cands[n - 1]
-    if picked is None:
-        # 完整点名候选
-        for c in cands:
-            name = str(c.get("name") or "")
-            if name and name in text:
-                picked = c
-                break
-    if picked is None and re.search(r"^(去|到|导航|走|行)\s*(吧|啊|呀)?$", text):
-        # 「去吧」过短，不猜
-        return None
-    if picked is None:
-        return None
 
-    dest = str(picked.get("name") or "").strip()
-    if not dest:
+def try_fast_path_route(query: str, nav_candidates: Optional[list] = None) -> Optional[RouteResult]:
+    """快路径总入口：澄清选点保留；复杂/复合句跳过代码匹配，交 StructuredNLU。"""
+    cand = try_nav_candidate_utterance(query, nav_candidates)
+    if cand is not None:
+        return cand
+    if should_skip_code_fast_path(query):
         return None
+    return (
+        try_app_utterance(query)
+        or try_status_utterance(query)
+        or try_direct_cabin_utterance(query)
+        or try_nearby_utterance(query)
+        or try_web_search_utterance(query)
+    )
+
+
+def try_navigate_utterance(query: str) -> Optional[RouteResult]:
+    """已废弃主路径：导航目的地一律交 StructuredNLU。仅保留供单测/离线脚本引用。"""
+    return None
+
+
+def try_nav_candidate_utterance(query: str, candidates: Optional[list] = None) -> Optional[RouteResult]:
+    """上一轮导航澄清后：仅在候选集合内选定；选中则直达导航。"""
+    from app.nlu.nav_resolve import resolve_nav_selection
+
+    sel = resolve_nav_selection(query, candidates)
+    if sel.action != "navigate" or not sel.destination:
+        return None
+    args: dict = {"destination": sel.destination, "preference": "fastest"}
+    loc = (sel.location or "").strip()
+    if loc and "," in loc:
+        args["destination_location"] = loc
     return RouteResult(
         intent=IntentType.TOOL,
         confidence=0.99,
@@ -135,10 +344,11 @@ def try_nav_candidate_utterance(query: str, candidates: Optional[list] = None) -
         tool_calls=[
             ToolCall(
                 name="navigation.navigate_to",
-                arguments={"destination": dest, "preference": "fastest"},
-                reason=f"用户选定：{dest}",
+                arguments=args,
+                reason=f"用户选定：{sel.destination}",
             )
         ],
+        done=True,
     )
 
 
@@ -147,14 +357,29 @@ def try_status_utterance(query: str) -> Optional[RouteResult]:
     text = (query or "").strip()
     if not text:
         return None
-    # 氛围灯/灯光开没开
-    if re.search(r"(氛围灯|阅读灯|顶灯|灯光).{0,8}(开|关|亮|状态|怎样|怎么样)", text) or re.search(
-        r"(开着|关着|开了|关了).{0,6}(氛围灯|阅读灯|顶灯|灯光)|(氛围灯|阅读灯|顶灯|灯光).{0,6}(开着|关着|开了吗|关了吗)",
-        text,
+    # 氛围灯/灯光开没开（灯光秀是手册功能，不要当成读灯状态）
+    if "灯光秀" not in text and (
+        re.search(r"(氛围灯|阅读灯|顶灯|(?<!秀)灯光).{0,8}(开了吗|关了吗|开着|关着|亮着|亮不亮|状态)", text)
+        or re.search(
+            r"(开着|关着|开了|关了).{0,6}(氛围灯|阅读灯|顶灯|灯光)|(氛围灯|阅读灯|顶灯|灯光).{0,6}(开着|关着|开了吗|关了吗)",
+            text,
+        )
+        or re.search(r"(现在|当前).{0,4}(氛围灯|阅读灯|顶灯|灯光)", text)
     ):
         return RouteResult(intent=IntentType.SEARCH, confidence=0.98, reason="查询灯光状态")
-    if re.search(r"(现在|当前).{0,4}(氛围灯|阅读灯|顶灯|灯光)", text):
-        return RouteResult(intent=IntentType.SEARCH, confidence=0.97, reason="查询灯光状态")
+    # 在哪 / 位置（含「哪儿 / 哪啊」口语）。不要把「好看在哪里」当成定位。
+    if re.search(
+        r"(我|我们|这辆车|车子).{0,8}(现在|当前)?.{0,4}(在哪|在哪里|在哪儿|什么地方|哪个位置|啥地方)"
+        r"|(现在|当前).{0,4}(在哪|在哪里|在哪儿|位置|定位)"
+        r"|(到哪了|到哪儿了)",
+        text,
+    ):
+        return RouteResult(intent=IntentType.SEARCH, confidence=0.98, reason="查询当前位置")
+    if re.fullmatch(
+        r"(我|我们)?(现在|当前)?(在哪|在哪里|在哪儿|什么地方|哪个位置)[儿啊呀呢吧哦噢～~？?。！!\s]*$",
+        text,
+    ):
+        return RouteResult(intent=IntentType.SEARCH, confidence=0.99, reason="查询当前位置")
     # 导航剩余时间/里程
     if re.search(
         r"(还差|还有|剩余|还要).{0,6}(几分钟|多久|多远|几公里|多少公里|多少分钟)"
@@ -272,25 +497,14 @@ def try_direct_cabin_utterance(query: str) -> Optional[RouteResult]:
 
 
 def try_preference_utterance(query: str) -> Optional[RouteResult]:
-    """偏好记忆：我坐副驾喜欢22度 → 写入记忆并由 runtime 执行温控。"""
-    text = (query or "").strip()
-    if not text:
-        return None
-    if not re.search(r"(我坐|坐在|我在|喜欢|偏好|记住|默认).{0,12}(副驾|主驾|左后|右后|中后|\d{2}\s*度)", text):
-        if not re.search(r"(副驾|主驾).{0,8}(喜欢|偏好|调到|设为).{0,6}\d{2}\s*度", text):
-            return None
-    return RouteResult(
-        intent=IntentType.TOOL,
-        confidence=0.99,
-        reason="记忆偏好并应用",
-        tool_calls=[],
-    )
+    """已废弃：记忆意图改由轮初 LLM 抽取 + primary_memory_turn 处理。"""
+    return None
 
 
 def try_combo_cabin_utterance(query: str) -> Optional[RouteResult]:
-    """一句话多工具：导航 + 空调 + 音乐，端到端改地图/中控/语音。"""
+    """一句话多工具：导航 + 空调 + 音乐（仅非复合句兜底；复合句交 StructuredNLU）。"""
     text = (query or "").strip()
-    if not text:
+    if not text or should_skip_code_fast_path(text):
         return None
     has_nav = bool(re.search(r"导航到|(导航|开导航).{0,16}(软件园|五道口|西单|西站)", text))
     has_climate = bool(re.search(r"(空调|温度).{0,10}\d{2}\s*度|\d{2}\s*度.{0,6}(空调|温度)", text))
@@ -345,3 +559,153 @@ def try_combo_cabin_utterance(query: str) -> Optional[RouteResult]:
         reason="一句话多工具联动",
         tool_calls=calls[:6],
     )
+
+
+_VEHICLE_TERMS = (
+    r"(充电|超充|充电桩|充电口|充电器|充电设备|充电枪|"
+    r"泊车|自动泊车|智能泊车|哨兵|玩具箱|灯光秀|"
+    r"后备箱|前备箱|车窗|天窗|车门|方向盘|座椅|"
+    r"摄像头|前撞|碰撞预警|预警|制动|能量回收|宠物模式|营地模式|"
+    r"手机钥匙|行车记录|胎压|电池图标|电池|电量|"
+    r"Model\s*[SXY3]|车辆|车主|用车|手册|"
+    r"雨刮|雨刷|除雾|除霜|冷凝|总质量|超时占用|"
+    r"音频内容|超级充电|仪表盘|故障灯|指示灯)"
+)
+_HOWTO = r"(怎么|如何|怎样|咋|怎么办|该如何|用哪些方式|怎样才能|要怎么|该怎么|如何操作)"
+_WHY = r"(为什么|为啥|为何)"
+_WHAT = r"(什么意思|代表着什么|是什么意思|什么情况|什么状况|哪些东西|包含哪些|能不能|可以监测|哪种情况)"
+_TROUBLE = r"(无法|不能|充不了|充不上|充不进|不正常|故障|报警|坏了|没电|耗尽|打不开|关不上|充不进去)"
+_KNOWLEDGE_REASON_POS = re.compile(
+    r"(应调用\s*knowledge|intent\s*[:=]\s*[\"']?knowledge|查手册|手册问法|"
+    r"车主手册|功能操作咨询|知识库问法)",
+    re.I,
+)
+_KNOWLEDGE_REASON_NEG = re.compile(
+    r"(禁止.{0,16}knowledge|不是\s*knowledge|不要.{0,12}knowledge|"
+    r"符合\s*chat|属于.{0,8}(寒暄|闲聊)|而非.{0,6}闲聊)",
+    re.I,
+)
+
+
+def looks_like_vehicle_knowledge(query: str) -> bool:
+    """车主手册问法：怎么用 / 故障怎么办 / 图标什么意思。"""
+    text = (query or "").strip()
+    if not text:
+        return False
+    if looks_like_smalltalk(text):
+        return False
+    if re.search(r"(附近|周边|旁边).{0,10}(充电站|超充|加油站|停车场|餐厅|美食|咖啡)", text):
+        return False
+    if re.search(
+        r"(现在|当前).{0,8}(多少度|音量|在听|播放|开了吗|关了吗|电量多少|剩余续航)|"
+        r"(空调|温度|音量).{0,4}(现在|当前)?.{0,4}(多少|几度|开了吗|关了吗)",
+        text,
+    ):
+        return False
+    if re.search(
+        r"^(帮我|请)?(把)?(打开|关闭|关掉|开启|设置|调到|播放|导航到|导航去)",
+        text,
+    ) and not re.search(_HOWTO, text) and not re.search(_TROUBLE, text):
+        return False
+
+    vehicle = bool(re.search(_VEHICLE_TERMS, text, re.I))
+    howto = bool(re.search(_HOWTO, text))
+    why = bool(re.search(_WHY, text))
+    what = bool(re.search(_WHAT, text))
+    trouble = bool(re.search(_TROUBLE, text))
+
+    if re.search(r"(无法充电|充不了电|充不上电|充不进电|不能充电|没法充电)", text):
+        return True
+    if trouble and (vehicle or howto or "怎么办" in text):
+        return True
+    if howto and vehicle:
+        return True
+    if why and vehicle:
+        return True
+    if what and vehicle:
+        return True
+    if howto and re.search(r"(清洁|操作|使用|设置|开启|关闭|寻找|停车|搜索)", text) and re.search(
+        r"(车|摄像头|后备箱|充电|制动|音频)", text
+    ):
+        return True
+    return False
+
+
+def looks_like_smalltalk(query: str) -> bool:
+    """寒暄、问助手身份、陪聊吐槽：走 chat，不是查车辆识别码。"""
+    text = (query or "").strip()
+    if not text:
+        return False
+    t = re.sub(r"[！!。.?？~～\s]+$", "", text)
+    t = re.sub(r"[啊呀哦呢吧嘛呀]+$", "", t).strip()
+    if re.fullmatch(
+        r"(小特[，,\s]*)?(你|您)(是谁|谁呀|谁啊|叫什么|叫啥|是什么|什么人|什么来头)",
+        t,
+    ):
+        return True
+    if re.search(
+        r"(介绍一下你自己|你是人工智能|你是机器人|你是ai|who are you|what are you)",
+        text,
+        re.I,
+    ):
+        return True
+    if t in {
+        "你好",
+        "您好",
+        "嗨",
+        "哈喽",
+        "在吗",
+        "谢谢",
+        "谢谢你",
+        "感谢",
+        "再见",
+        "拜拜",
+        "bye",
+        "小特",
+    }:
+        return True
+    if re.search(r"(心情|烦躁|孤独|吐槽|陪我聊|放松一下|脑子很乱|不顺心|好无聊|讲个笑话)", text):
+        return True
+    return False
+
+
+def reason_wants_knowledge(reason: str) -> bool:
+    text = reason or ""
+    if not text or _KNOWLEDGE_REASON_NEG.search(text):
+        return False
+    return bool(_KNOWLEDGE_REASON_POS.search(text))
+
+
+def coerce_planned_intent(intent: IntentType, query: str, reason: str = "") -> IntentType:
+    """闲聊/身份问被标成 knowledge 时纠回去；手册意图只信 LLM 的 intent/reason，不用 query 正则。"""
+    if looks_like_smalltalk(query) or looks_like_entertainment_chat(query):
+        return IntentType.CHAT if intent == IntentType.KNOWLEDGE else intent
+    if intent == IntentType.CHAT and reason_wants_knowledge(reason):
+        return IntentType.KNOWLEDGE
+    return intent
+
+
+def try_knowledge_utterance(query: str) -> Optional[RouteResult]:
+    """已废弃运行时快路径：手册问法一律走 StructuredNLU，不在此做正则直达。"""
+    return None
+
+
+def try_chat_utterance(query: str) -> Optional[RouteResult]:
+    """已不再作为运行时快路径；保留给纠偏测试。身份/陪聊走 StructuredNLU。"""
+    return None
+
+
+def looks_like_entertainment_chat(query: str) -> bool:
+    """歌曲创作故事/娱乐闲谈：不应走进车主手册 knowledge 路径。"""
+    text = (query or "").strip()
+    if not text:
+        return False
+    if re.search(
+        r"(这首歌|那首歌|这曲|那曲|歌词|专辑|创作背景|作曲|作词|谁唱的|歌手|"
+        r"有什么故事|什么故事|背后的故事|为什么叫这个名字)",
+        text,
+    ):
+        return True
+    if re.search(r"(电影|影讯|八卦|明星|剧情|冷知识|猜谜|讲个故事|笑话)", text):
+        return True
+    return False

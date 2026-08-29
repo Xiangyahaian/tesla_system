@@ -1,123 +1,125 @@
-# Tesla System · 智能座舱 Agent
+# Tesla System
 
-多意图车载助手（「小特」）：自然语言控车 + RAG 手册问答 + React 座舱 HMI。  
-带 **Gateway 车控、Policy 确认、可观测轨迹** 的 Cabin Runtime。
+基于多意图识别的智能座舱问答与控车系统。面向车载口语场景，统一处理手册问答、指令执行、车况查询与闲聊，并提供可演示的 React 座舱 HMI。
 
-> GitHub: [Xiangyahaian/tesla_system](https://github.com/Xiangyahaian/tesla_system)
+仓库地址：[Xiangyahaian/tesla_system](https://github.com/Xiangyahaian/tesla_system)
 
-## 能力一览
+---
 
-- **对话控车**：空调 / 座椅 / 媒体 / 导航 / 车窗等 Skills，状态实时回写 HUD
-- **安全门控**：高风险操作（如开后备箱）需用户确认后再执行
-- **RAG 手册**：Tesla 说明书检索 + 引用，可与车控同轮编排
-- **座舱 HMI**：Vite + React 多路由（Drive / Apps / Agent / Setup）
-- **地图导航**：高德折线路网、巡航走廊与导航模式
-- **语音**：ASR / TTS（可配置百炼等）；支持按住说话
+## 系统概览
 
-## 架构（简图）
+| 能力 | 说明 |
+|------|------|
+| 多意图编排 | 规则快路径 + Structured NLU；复杂句走 ReAct 多步规划（最多 5 步） |
+| 工具控车 | 气候 / 座椅 / 舱体 / 媒体 / 导航 / ADAS 等 JSON Schema 工具，经 Gateway 回写车况 |
+| 手册 RAG | PyMuPDF 解析 + MongoDB / Milvus；稠密+稀疏+BM25 多路召回，Rerank 精排 |
+| 记忆与安全 | 每用户 persona / memories / preferences 三文件；高风险操作 Policy 确认 |
+| 座舱 HMI | Vite + React：驾驶页、应用、Agent 轨迹、设置；语音 ASR / TTS 可选 |
+
+---
+
+## 架构
 
 ```text
-用户语音/文本
-    ↓
-FastAPI (`python run.py` · 默认 :6006)
-    ↓
-NLU / Agent Loop ──→ Tools / Skills ──→ Stub Gateway（可换真车机）
-    ↓                      ↓
- RAG 手册              vehicle state
-    ↓
-React Cabin HMI（`frontend/dist` 由后端托管）
+语音 / 文本
+    │
+    ▼
+FastAPI  (python run.py · 默认 :6006)
+    │
+    ├─ NLU / Agent Loop ──► Tool Registry ──► Vehicle Gateway
+    │                              │
+    │                              └─► vehicle.json（按用户隔离）
+    ├─ RAG（手册检索 + 引用）
+    ├─ 记忆落盘（persona / memories / preferences）
+    └─ 静态托管 frontend/dist
 ```
 
-| 目录 | 说明 |
+| 路径 | 说明 |
 |------|------|
-| `app/` | Runtime：API、Agent、Gateway、NLU、地图、语音 |
+| `app/` | 后端 Runtime：API、编排、NLU、工具、Gateway、RAG、语音、会话 |
 | `frontend/` | 座舱 HMI（React + TypeScript + Zustand） |
-| `skills/` | 各域 Skill 说明与约定 |
-| `context/` / `data/` | RAG 与语料相关 |
-| `webui/` | 旧版 HTML UI（`/legacy`） |
-| `state/` | 运行时状态（本地，勿提交密钥） |
+| `data/` | 手册与评测语料（本地索引 / Mongo 数据默认不入库） |
+| `tests/` / `test/` | 单元测试与压测用例 |
+| `docs/` | 规则目录等补充文档 |
+| `state/` | 运行时状态（本地生成，勿提交密钥与会话库） |
 
-更细的产品说明见 [`PRODUCT.md`](PRODUCT.md)，演示剧本见 [`DEMO.md`](DEMO.md)。
+---
 
-## 快速开始
+## 环境要求
 
-### 环境
-
-- Python 3.10+（推荐 conda 环境名 `tesla`）
+- Python 3.10+（推荐 conda 环境 `tesla`）
 - Node.js 18+（构建前端）
-- 可选：MongoDB（部分数据路径）、本地 vLLM / 云端 LLM Key
+- 可选：MongoDB、Milvus（Lite）、本地 vLLM 或云端 LLM Key
 
 ```bash
-conda activate tesla   # 或自行创建虚拟环境
+conda activate tesla
 pip install -r requirements.txt
-
-cp .env.example .env   # 填入 LLM / 地图等密钥
+cp .env.example .env   # 填入 LLM / 地图等配置
 ```
 
-### 配置（`.env`）
-
-至少配置一种 LLM（示例见 `.env.example`）：
+### 关键配置（`.env`）
 
 | 变量 | 用途 |
 |------|------|
-| `BAILIAN_API_KEY` 等 | 阿里云百炼 / 兼容 OpenAI 的对话与语音 |
-| `VLLM_*` | 本地 vLLM |
+| `BAILIAN_*` | 阿里云百炼对话 / 语音（远程模型） |
+| `VLLM_*` | 本地 vLLM 端点与模型名 |
 | `AMAP_MAPS_API_KEY` / `AMAP_JS_KEY` | 高德路径规划与前端地图 |
 | `APP_PORT` | 服务端口，默认 `6006` |
 
-**不要**把 `.env`、`.pem`、个人密钥提交进仓库。
+请勿将 `.env`、私钥或个人 API Key 提交到仓库。
 
-### 启动
+---
 
-生产式（后端托管已构建的 HMI）：
+## 启动
 
 ```bash
+# 构建座舱前端（首次或前端变更后）
 cd frontend && npm install && npm run build && cd ..
+
+# 启动后端（托管 frontend/dist）
 python run.py
 ```
 
-浏览器打开：<http://127.0.0.1:6006>
+浏览器访问：<http://127.0.0.1:6006>
 
-热更新开发：
+前端热更新开发：
 
 ```bash
-# 终端 1
-python run.py
-
-# 终端 2
-cd frontend && npm run dev   # 通常 http://127.0.0.1:5173，代理到 6006
+python run.py                 # 终端 1
+cd frontend && npm run dev    # 终端 2，通常 :5173
 ```
 
 | 路由 | 说明 |
 |------|------|
-| `/` | Drive：对话 + 车况中控 |
+| `/` | 驾驶页：对话 + 车况 / 地图 |
 | `/apps` | 车机应用 |
-| `/agent` | Agent 轨迹 / 上下文 |
-| `/settings` | 模型、TTS、工具注册表 |
-| `/legacy` | 旧 UI |
+| `/agent` | Agent 轨迹与本轮模型输入 |
+| `/settings` | 模型、语音、工具等设置 |
 
-`PREFER_CABIN_HMI=0` 可强制回退旧 webui。
+---
 
-## 演示建议
+## 设计要点（摘要）
 
-约 3–4 分钟剧本见 [`DEMO.md`](DEMO.md)，例如：
+1. **意图双通道**：短指令可走代码快路径；超长 / 多域复合句交给 LLM，避免误解析。
+2. **观察后再规划**：无依赖工具可并行；有依赖按返回结果拆步，失败可纠参。
+3. **用户级车况隔离**：一用户一辆车（`state/sessions/<user_id>/`），会话间共享车况、分开 transcript。
+4. **画像三文件**：人设 / 身份记忆 / 偏好语义改写落盘；轮末更新不阻塞口语回复。
+5. **安全门控**：结合车速、挡位与工具风险等级，拒绝或二次确认。
 
-1. 「打开空调并播放周杰伦的晴天」→ 多工具 + HUD 变化  
-2. 「现在音量多少」→「小一点」→ 指代与状态读写  
-3. 「打开后备箱」→ 确认门控  
-4. Apps 打开应用后问「自动泊车怎么用」→ RAG 引用  
+更细的产品约定见 [`PRODUCT.md`](PRODUCT.md)，演示剧本见 [`DEMO.md`](DEMO.md)。
 
-## 分支说明
+---
 
-| 分支 | 说明 |
-|------|------|
-| `main` | 稳定 Runtime 基线 |
-| `feature/cabin-cockpit` | 座舱 HMI / 导航 / 多路由壳（见 [PR #1](https://github.com/Xiangyahaian/tesla_system/pull/1)） |
+## 测试
 
-## 前端单独说明
+```bash
+python -m unittest discover -s tests -v
+```
 
-见 [`frontend/README.md`](frontend/README.md)。
+压测用例与脚本位于 `test/`（需本地或远程模型可用）。
+
+---
 
 ## License
 
-如无另行声明，仅供学习与演示；第三方依赖（含 `RAG-Retrieval` 等）遵循各自许可证。
+如无另行声明，本仓库仅供学习与演示。第三方依赖（含 `RAG-Retrieval` 等）遵循各自许可证。

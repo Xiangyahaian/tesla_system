@@ -30,6 +30,7 @@ REST_GEO = "https://restapi.amap.com/v3/geocode/geo"
 REST_DRIVING = "https://restapi.amap.com/v3/direction/driving"
 REST_AROUND = "https://restapi.amap.com/v3/place/around"
 REST_TEXT = "https://restapi.amap.com/v3/place/text"
+REST_TIPS = "https://restapi.amap.com/v3/assistant/inputtips"
 MCP_URL = "https://mcp.amap.com/mcp"
 
 
@@ -194,6 +195,71 @@ def _rest_place_text(keywords: str, city: str = "北京", offset: int = 8) -> Li
             }
         )
     return out
+
+
+def search_places(
+    keywords: str,
+    *,
+    city: str = "北京",
+    lng: Optional[float] = None,
+    lat: Optional[float] = None,
+    limit: int = 8,
+) -> List[Dict[str, Any]]:
+    """输入提示 / 地点搜索：优先 inputtips，失败回落 place/text。"""
+    q = (keywords or "").strip()
+    if not q:
+        return []
+    key = getattr(config, "AMAP_MAPS_API_KEY", "") or ""
+    if not key:
+        return []
+    limit = max(1, min(12, int(limit)))
+    tips_params: Dict[str, Any] = {
+        "key": key,
+        "keywords": q,
+        "city": city,
+        "citylimit": "true",
+        "datatype": "all",
+    }
+    if lng is not None and lat is not None:
+        tips_params["location"] = f"{float(lng):.6f},{float(lat):.6f}"
+    out: List[Dict[str, Any]] = []
+    try:
+        data = _http_json(f"{REST_TIPS}?{urllib.parse.urlencode(tips_params)}", timeout=8)
+        if str(data.get("status")) == "1":
+            for tip in data.get("tips") or []:
+                if not isinstance(tip, dict):
+                    continue
+                name = str(tip.get("name") or "").strip()
+                loc = tip.get("location")
+                if isinstance(loc, list):
+                    loc = ""
+                loc = str(loc or "").strip()
+                if not name or not loc or "," not in loc:
+                    continue
+                district = tip.get("district") or ""
+                addr = tip.get("address") or ""
+                if isinstance(addr, list):
+                    addr = addr[0] if addr else ""
+                address = " · ".join(x for x in (str(district).strip(), str(addr).strip()) if x)
+                out.append(
+                    {
+                        "name": name,
+                        "address": address,
+                        "location": loc,
+                        "type": tip.get("typecode") or "",
+                        "source": "inputtips",
+                    }
+                )
+    except Exception:
+        out = []
+    if len(out) < 3:
+        for p in _rest_place_text(q, city=city, offset=limit):
+            if any(x.get("location") == p.get("location") for x in out):
+                continue
+            out.append({**p, "source": "place_text"})
+            if len(out) >= limit:
+                break
+    return _dedupe_pois(out)[:limit]
 
 
 def _pick_best_poi(keywords: str, pois: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:

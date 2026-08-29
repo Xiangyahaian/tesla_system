@@ -38,3 +38,4 @@ anyio==4.9.0
 requests==2.32.3
 joblib==1.5.0
 threadpoolctl==3.6.0
+pypinyin==0.55.0

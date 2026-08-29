@@ -6,7 +6,9 @@ import asyncio
 import json
 import os
 import sys
+import threading
 from pathlib import Path
+from typing import Any, Iterator
 
 # 保证项目根在 path 中
 ROOT = Path(__file__).resolve().parents[2]
@@ -20,6 +22,18 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from app import config
+from app.auth import (
+    deny_unless_admin,
+    deny_unless_can_manage,
+    deny_unless_logged_in,
+    deny_unless_session_access,
+    inspect_actor,
+    is_admin_nickname,
+    read_actor_session,
+    visible_sessions,
+)
+from app.agent.context import bundle_view_sections
+from app.agent.speech_guard import looks_like_raw_error, public_error_text
 from app.llm.client import get_llm
 from app.models import ChatRequest, ControlRequest, ModelStatus, ToolCall
 from app.orchestrator.runtime import get_orchestrator
@@ -36,6 +50,8 @@ HAS_CABIN_HMI = CABIN_DIST.exists() and (CABIN_DIST / "index.html").exists()
 @app.on_event("startup")
 async def startup():
     config.SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+    if getattr(config, "LLM_LOG_ENABLE", True):
+        Path(config.LLM_LOG_DIR).mkdir(parents=True, exist_ok=True)
     get_registry()
     if config.RESET_ON_STARTUP:
         get_session_store().reset("default")
@@ -75,19 +91,19 @@ async def legacy_ui(request: Request):
 
 
 @app.get("/api/model-status", response_class=JSONResponse)
-async def model_status():
-    remote = get_llm("remote")
-    local_ok = False
-    try:
-        local_ok = get_llm("local").available
-    except Exception:
-        local_ok = False
+def model_status():
+    from app.llm.client import probe_local_llm
+
+    local = probe_local_llm()
     return {
         **ModelStatus(
-            remote_available=remote.available,
-            local_available=local_ok,
-            local_model_name=config.VLLM_MODEL_NAME,
+            remote_available=bool(config.BAILIAN_API_KEY),
+            local_available=bool(local.get("ok")),
+            local_model_name=str(local.get("model") or config.VLLM_MODEL_NAME),
         ).model_dump(),
+        "local_endpoint": local.get("endpoint") or config.VLLM_API_BASE,
+        "local_error": local.get("error") or "",
+        "local_served": local.get("served") or [],
         "speech": {
             "asr_model": config.ASR_MODEL,
             "tts_model": config.TTS_MODEL,
@@ -118,19 +134,76 @@ async def maps_config():
     }
 
 
-@app.get("/api/state")
-async def get_state(session_id: str = Query("default")):
+@app.get("/api/maps/search", response_class=JSONResponse)
+async def maps_search(
+    request: Request,
+    q: str = Query(""),
+    session_id: str = Query("default"),
+    city: str = Query("北京"),
+    limit: int = Query(8, ge=1, le=20),
+):
+    from app.maps.amap_mcp import search_places
+
+    actor_sid = read_actor_session(request)
+    denied = deny_unless_session_access(actor_sid, session_id)
+    if denied:
+        return denied
+
+    keywords = (q or "").strip()
+    if not keywords:
+        return {"ok": True, "query": "", "pois": [], "count": 0}
     sess = get_session_store().get(session_id)
+    nav = (sess.gateway.snapshot() or {}).get("navigation") or {}
+    pos = nav.get("position") or {}
+    lng_f = lat_f = None
+    try:
+        if pos.get("lng") is not None and pos.get("lat") is not None:
+            lng_f = float(pos.get("lng"))
+            lat_f = float(pos.get("lat"))
+    except (TypeError, ValueError):
+        lng_f = lat_f = None
+    pois = search_places(keywords, city=city, lng=lng_f, lat=lat_f, limit=limit)
+    return {"ok": True, "query": keywords, "pois": pois, "count": len(pois)}
+
+
+@app.get("/api/weather", response_class=JSONResponse)
+async def get_weather(
+    request: Request,
+    session_id: str = Query("default"),
+    force: bool = Query(False),
+):
+    from app.weather import weather_for_vehicle
+
+    actor_sid = read_actor_session(request)
+    denied = deny_unless_session_access(actor_sid, session_id)
+    if denied:
+        return denied
+
+    sess = get_session_store().get(session_id)
+    nav = (sess.gateway.snapshot() or {}).get("navigation") or {}
+    return weather_for_vehicle(nav, force=bool(force))
+
+
+@app.get("/api/state")
+def get_state(request: Request, session_id: str = Query("default")):
+    actor_sid = read_actor_session(request)
+    denied = deny_unless_session_access(actor_sid, session_id)
+    if denied:
+        return denied
+    store = get_session_store()
+    sess = store.get(session_id, touch=False)
+    meta = store.db.load_meta(session_id) or {}
     return {
         "session_id": session_id,
         "state": sess.gateway.snapshot(),
         "pending": sess.pending.model_dump() if sess.pending else None,
         "slots": sess.slots,
         "agent": {
-            "transcript_chars": sess.transcript.total_chars(),
-            "transcript_messages": len(sess.transcript.load()),
-            "memory_preview": sess.memory.load_auto_memory(max_lines=30)[:500],
+            "transcript_chars": int(meta.get("transcript_chars") or 0),
+            "transcript_messages": int(meta.get("message_count") or 0),
+            "memory_preview": "",
             "session_dir": str(sess.root),
+            "user_dir": str(getattr(sess, "user_root", sess.root)),
         },
     }
 
@@ -140,12 +213,19 @@ async def agent_context(session_id: str = Query("default")):
     store = get_session_store()
     sess = store.get(session_id)
     bundle = store.assemble_context(sess)
+    system = bundle.system or ""
+    user_context = bundle.user_context or ""
+    recent_dialog = bundle.recent_dialog or ""
     return {
         "session_id": session_id,
         "sources": bundle.sources,
         "total_chars": bundle.total_chars,
-        "recent_dialog": bundle.recent_dialog[-2000:],
-        "user_context_preview": bundle.user_context[:3000],
+        "system": system,
+        "user_context": user_context,
+        "recent_dialog": recent_dialog,
+        # 兼容旧前端字段：完整材料，不再截断
+        "user_context_preview": user_context,
+        "sections": bundle_view_sections(bundle),
     }
 
 
@@ -163,19 +243,27 @@ async def agent_compact(session_id: str = Query("default"), model: str = Query("
 
 
 @app.get("/api/agent/sessions")
-async def agent_sessions():
-    return {"sessions": get_session_store().list_sessions()}
+async def agent_sessions(request: Request, actor: str = Query("")):
+    actor_sid = read_actor_session(request, actor)
+    denied = deny_unless_logged_in(actor_sid)
+    if denied:
+        return denied
+    return {"sessions": visible_sessions(actor_sid)}
 
 
 @app.get("/api/sessions")
-async def list_sessions():
-    store = get_session_store()
-    return {"ok": True, "sessions": store.list_sessions()}
+def list_sessions(request: Request, actor: str = Query("")):
+    actor_sid = read_actor_session(request, actor)
+    denied = deny_unless_logged_in(actor_sid)
+    if denied:
+        return denied
+    info = inspect_actor(actor_sid)
+    return {"ok": True, "role": info["role"], "is_admin": info["is_admin"], "sessions": visible_sessions(actor_sid)}
 
 
 @app.post("/api/users/login")
 async def user_login(request: Request):
-    """用户管理：昵称登录 → SQLite users 记录 + 独立 session / Auto Memory。"""
+    """用户管理：昵称登录 → SQLite users 记录 + 独立 session / 用户记忆。"""
     try:
         body = await request.json()
     except Exception:
@@ -185,72 +273,119 @@ async def user_login(request: Request):
         return JSONResponse({"ok": False, "error": "请填写昵称"}, status_code=400)
     if len(nickname) > 24:
         return JSONResponse({"ok": False, "error": "昵称最多 24 个字"}, status_code=400)
-    store = get_session_store()
     try:
+        store = get_session_store()
         sess = store.ensure_user(nickname)
     except ValueError as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+    except Exception:
+        return JSONResponse({"ok": False, "error": "登录失败，请稍后重试"}, status_code=500)
     user = store.db.get_user_by_session(sess.session_id) or {}
-    return {
+    nick = user.get("nickname") or nickname
+    admin = is_admin_nickname(nick)
+    payload = {
         "ok": True,
-        "nickname": user.get("nickname") or nickname,
+        "nickname": nick,
         "session_id": sess.session_id,
         "title": sess.title,
-        "user": user,
-        "users": store.list_users(),
+        "role": "admin" if admin else "user",
+        "is_admin": admin,
+        "user": {
+            "id": user.get("id"),
+            "nickname": nick,
+            "session_id": sess.session_id,
+            "role": "admin" if admin else "user",
+        },
     }
+    if admin:
+        payload["users"] = store.list_users()
+    return payload
 
 
 @app.get("/api/users")
-async def list_users():
+async def list_users(request: Request, actor: str = Query("")):
+    denied = deny_unless_admin(read_actor_session(request, actor))
+    if denied:
+        return denied
     store = get_session_store()
     return {"ok": True, "users": store.list_users()}
 
 
+@app.delete("/api/users/{user_id}")
+async def delete_user(user_id: str, request: Request, actor: str = Query("")):
+    denied = deny_unless_admin(read_actor_session(request, actor))
+    if denied:
+        return denied
+    store = get_session_store()
+    result = store.delete_user_account(user_id)
+    if not result.get("ok"):
+        return JSONResponse(result, status_code=400)
+    return {**result, "users": store.list_users()}
+
+
 @app.post("/api/sessions")
-async def create_session(request: Request):
+async def create_session(request: Request, actor: str = Query("")):
     try:
         body = await request.json()
     except Exception:
         body = {}
+    actor_sid = read_actor_session(request, actor or (body or {}).get("actor"))
+    denied = deny_unless_logged_in(actor_sid)
+    if denied:
+        return denied
+    info = inspect_actor(actor_sid)
     title = str((body or {}).get("title") or "").strip() or None
     store = get_session_store()
-    sess = store.create_session(title=title)
+    owner_id = str((info.get("user") or {}).get("id") or "")
+    sess = store.create_session(title=title, owner_id=owner_id)
     return {
         "ok": True,
         "session_id": sess.session_id,
         "title": sess.title,
-        "sessions": store.list_sessions(),
+        "sessions": visible_sessions(actor_sid, store),
+        "state": sess.gateway.snapshot(),
     }
 
 
 @app.patch("/api/sessions/{session_id}")
-async def rename_session(session_id: str, request: Request):
+async def rename_session(session_id: str, request: Request, actor: str = Query("")):
     try:
         body = await request.json()
     except Exception:
         body = {}
+    actor_sid = read_actor_session(request, actor or (body or {}).get("actor"))
+    denied = deny_unless_can_manage(actor_sid, session_id)
+    if denied:
+        return denied
     title = str((body or {}).get("title") or "").strip()
     if not title:
         return JSONResponse({"ok": False, "error": "title 不能为空"}, status_code=400)
     store = get_session_store()
     if not store.rename_session(session_id, title):
         return JSONResponse({"ok": False, "error": "会话不存在或无法重命名"}, status_code=404)
-    return {"ok": True, "session_id": session_id, "title": title, "sessions": store.list_sessions()}
+    return {"ok": True, "session_id": session_id, "title": title, "sessions": visible_sessions(actor_sid, store)}
 
 
 @app.delete("/api/sessions/{session_id}")
-async def delete_session(session_id: str):
+async def delete_session(session_id: str, request: Request, actor: str = Query("")):
+    actor_sid = read_actor_session(request, actor)
+    denied = deny_unless_can_manage(actor_sid, session_id)
+    if denied:
+        return denied
     store = get_session_store()
     result = store.delete_session(session_id)
     if not result.get("ok"):
         return JSONResponse(result, status_code=400)
-    return {**result, "sessions": store.list_sessions()}
+    return {**result, "sessions": visible_sessions(actor_sid, store)}
 
 
 @app.post("/api/sessions/purge")
-async def purge_all_sessions():
-    """清空全部用户会话与昵称用户，仅保留重置后的 default。"""
+async def purge_all_sessions(request: Request, actor: str = Query("")):
+    """清空全部用户会话与昵称用户，仅保留重置后的 default。管理员专属。"""
+    actor_sid = read_actor_session(request, actor)
+    denied = deny_unless_admin(actor_sid)
+    if denied:
+        return denied
     store = get_session_store()
     result = store.purge_all_sessions()
     return {**result, "sessions": store.list_sessions(), "users": store.list_users()}
@@ -258,10 +393,15 @@ async def purge_all_sessions():
 
 @app.get("/api/sessions/{session_id}/messages")
 async def session_messages(
+    request: Request,
     session_id: str,
     limit: int = Query(200, ge=1, le=1000),
     offset: int = Query(0, ge=0),
+    actor: str = Query(""),
 ):
+    denied = deny_unless_can_manage(read_actor_session(request, actor), session_id)
+    if denied:
+        return denied
     store = get_session_store()
     sess = store.get(session_id)
     # 优先 SQLite，保证与文件双写一致
@@ -349,7 +489,11 @@ async def cabin_spa_routes():
 
 
 @app.post("/api/reset")
-async def reset_state(session_id: str = Query("default")):
+async def reset_state(request: Request, session_id: str = Query("default")):
+    actor_sid = read_actor_session(request)
+    denied = deny_unless_session_access(actor_sid, session_id)
+    if denied:
+        return denied
     store = get_session_store()
     store.reset(session_id)
     sess = store.get(session_id)
@@ -358,15 +502,22 @@ async def reset_state(session_id: str = Query("default")):
 
 
 @app.post("/api/control")
-async def control_vehicle(req: ControlRequest):
+async def control_vehicle(req: ControlRequest, request: Request):
     """中控 HMI 直接执行工具，写回车辆状态。"""
+    actor_sid = read_actor_session(request)
+    denied = deny_unless_session_access(actor_sid, req.session_id)
+    if denied:
+        return denied
     reg = get_registry()
     if not reg.get(req.tool):
         return JSONResponse({"ok": False, "error": f"未知工具: {req.tool}"}, status_code=400)
     store = get_session_store()
     sess = store.get(req.session_id)
     call = ToolCall(name=req.tool, arguments=req.arguments or {})
-    result = reg.execute(sess.gateway, call)
+    try:
+        result = reg.execute(sess.gateway, call)
+    except Exception:
+        return JSONResponse({"ok": False, "error": "操作失败，请稍后重试"}, status_code=500)
     if req.tool == "driving.set_adas" and (req.arguments or {}).get("enable"):
         sess.gateway.tick_dynamics(0.35)
     if req.tool == "driving.set_speed" and float((req.arguments or {}).get("speed_kmh") or 0) > 0:
@@ -374,21 +525,29 @@ async def control_vehicle(req: ControlRequest):
     if req.tool in {"navigation.navigate_to", "navigation.start"} and result.success:
         sess.gateway.tick_dynamics(0.35)
     store.save(sess)
+    message = result.message or ""
+    if looks_like_raw_error(message):
+        message = "操作没做成，请稍后重试"
+    data = dict(result.data or {})
+    data.pop("error", None)
     return {
         "ok": bool(result.success),
-        "message": result.message,
-        "data": result.data,
+        "message": message,
+        "data": data,
         "tool": req.tool,
         "state": sess.gateway.snapshot(),
     }
 
 
 @app.post("/api/dynamics/tick")
-async def dynamics_tick(session_id: str = Query("default"), dt: float = Query(0.25)):
+def dynamics_tick(request: Request, session_id: str = Query("default"), dt: float = Query(0.25)):
+    actor_sid = read_actor_session(request)
+    denied = deny_unless_session_access(actor_sid, session_id)
+    if denied:
+        return denied
     store = get_session_store()
-    sess = store.get(session_id)
+    sess = store.get(session_id, touch=False)
     result = sess.gateway.tick_dynamics(dt)
-    store.save(sess)
     return {
         "ok": True,
         "message": result.get("message"),
@@ -480,8 +639,8 @@ async def asr_endpoint(request: Request):
         from app.speech import transcribe_audio
 
         text = await asyncio.to_thread(transcribe_audio, raw, format=fmt, language="zh")
-    except Exception as e:
-        return JSONResponse({"ok": False, "error": str(e)}, status_code=502)
+    except Exception:
+        return JSONResponse({"ok": False, "error": "没听清，请再说一次"}, status_code=502)
 
     return {"ok": True, "text": text, "model": config.ASR_MODEL}
 
@@ -506,8 +665,8 @@ async def tts_endpoint(request: Request):
         audio, mime, meta = await asyncio.to_thread(
             synthesize_speech, text, voice=voice, emotion=emotion
         )
-    except Exception as e:
-        return JSONResponse({"ok": False, "error": str(e)}, status_code=502)
+    except Exception:
+        return JSONResponse({"ok": False, "error": "语音播报暂时不可用"}, status_code=502)
 
     import base64
 
@@ -572,24 +731,97 @@ async def manual(download: int = Query(0)):
     return JSONResponse({"error": "PDF not found", "path": str(config.PDF_PATH)}, status_code=404)
 
 
+def _produce_chat_events(
+    iterator: Iterator[Any],
+    cancel: threading.Event,
+    finished: threading.Event,
+    loop: asyncio.AbstractEventLoop,
+    queue: asyncio.Queue,
+) -> None:
+    """在独立线程里跑同步 Agent 生成器，避免堵住 FastAPI 事件循环。"""
+    gen = iterator
+    try:
+        while not cancel.is_set():
+            try:
+                ev = next(gen)
+            except StopIteration:
+                loop.call_soon_threadsafe(queue.put_nowait, ("end", None))
+                return
+            loop.call_soon_threadsafe(queue.put_nowait, ("ev", ev))
+    except Exception as e:
+        loop.call_soon_threadsafe(queue.put_nowait, ("err", e))
+    finally:
+        try:
+            gen.close()
+        except Exception:
+            pass
+        if cancel.is_set():
+            loop.call_soon_threadsafe(queue.put_nowait, ("abort", None))
+        finished.set()
+
+
 @app.post("/api/chat")
-async def chat(req: ChatRequest):
+async def chat(req: ChatRequest, request: Request):
+    actor_sid = read_actor_session(request)
+    denied = deny_unless_session_access(actor_sid, req.session_id)
+    if denied:
+        return denied
     orch = get_orchestrator()
 
     async def event_gen():
+        loop = asyncio.get_running_loop()
+        queue: asyncio.Queue = asyncio.Queue()
+        cancel = threading.Event()
+        finished = threading.Event()
+        done = False
+
+        threading.Thread(
+            target=_produce_chat_events,
+            args=(
+                orch.handle(
+                    req.query,
+                    req.session_id,
+                    req.model,
+                    req.confirm,
+                    active_seat=req.active_seat,
+                ),
+                cancel,
+                finished,
+                loop,
+                queue,
+            ),
+            name="cabin-chat",
+            daemon=True,
+        ).start()
+
         try:
-            for ev in orch.handle(
-                req.query,
-                req.session_id,
-                req.model,
-                req.confirm,
-                active_seat=req.active_seat,
-            ):
-                yield json.dumps({"type": ev.type, "data": ev.data}, ensure_ascii=False) + "\n"
-                # 仅让出事件循环以便立刻刷出，不加人为延时
-                await asyncio.sleep(0)
+            while True:
+                kind, payload = await queue.get()
+                if kind == "end":
+                    done = True
+                    break
+                if kind == "abort":
+                    break
+                if kind == "err":
+                    spoken = public_error_text(payload)
+                    orch.finalize_open_turn(req.session_id, spoken)
+                    yield json.dumps({"type": "error", "data": spoken}, ensure_ascii=False) + "\n"
+                    done = True
+                    break
+                yield json.dumps({"type": payload.type, "data": payload.data}, ensure_ascii=False) + "\n"
+        except asyncio.CancelledError:
+            cancel.set()
+            raise
         except Exception as e:
-            yield json.dumps({"type": "error", "data": str(e)}, ensure_ascii=False) + "\n"
+            spoken = public_error_text(e)
+            orch.finalize_open_turn(req.session_id, spoken)
+            yield json.dumps({"type": "error", "data": spoken}, ensure_ascii=False) + "\n"
+            done = True
+        finally:
+            cancel.set()
+            await asyncio.to_thread(finished.wait, 180)
+            if not done:
+                orch.finalize_open_turn(req.session_id, "连接中断")
 
     return StreamingResponse(
         event_gen(),

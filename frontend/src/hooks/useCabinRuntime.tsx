@@ -9,8 +9,8 @@ import {
   useRef,
   useState,
 } from "react";
-import { fetchCabinState, fetchSessionMessages, resetCabin, streamChat } from "@/lib/api";
-import { extractAnswer, extractSpeakText, normalizeContexts } from "@/lib/answer";
+import { createSession, fetchCabinState, fetchSessionMessages, resetCabin, streamChat } from "@/lib/api";
+import { extractAnswer, extractSpeakText, looksLikeRawError, normalizeContexts, publicErrorText } from "@/lib/answer";
 import { recognizeBlob, speakText, startMicRecording, stopSpeaking, unlockAudioPlayback, type MicRecorder } from "@/lib/speech";
 import { useCabinStore } from "@/store/cabinStore";
 import type { CabinStateSnapshot, ChatMessage, TraceStep } from "@/lib/types";
@@ -54,8 +54,13 @@ type CabinRuntime = {
   onSubmit: (e: FormEvent) => void;
   onHoldStart: () => void;
   onHoldEnd: () => void;
+  /** 生成/播报中：暂停并撤回本轮发送，原文回到输入框 */
+  onPauseToggle: () => void;
+  canPause: boolean;
+  pauseLabel: "暂停";
   refreshState: () => Promise<void>;
   doReset: () => Promise<void>;
+  startNewSession: () => Promise<void>;
   switchSession: (sessionId: string, title?: string) => Promise<void>;
   reloadMessages: () => Promise<void>;
 };
@@ -67,17 +72,26 @@ export function CabinRuntimeProvider({ children }: { children: ReactNode }) {
   const recognizingRef = useRef(false);
   const micRef = useRef<MicRecorder | null>(null);
   const holdActiveRef = useRef(false);
+  const abortRef = useRef<AbortController | null>(null);
+  const liveAnswerRef = useRef("");
+  /** 本轮已推入对话的用户消息 id，暂停时撤回 */
+  const pendingUserMsgIdRef = useRef<string | null>(null);
+  /** 本轮原文，暂停后填回输入框 */
+  const pendingQueryRef = useRef("");
 
   const sessionId = useCabinStore((s) => s.sessionId);
   const model = useCabinStore((s) => s.model);
   const busy = useCabinStore((s) => s.busy);
+  const phase = useCabinStore((s) => s.phase);
   const ttsEnabled = useCabinStore((s) => s.ttsEnabled);
   const ttsVolume = useCabinStore((s) => s.ttsVolume);
+  const ttsPaused = useCabinStore((s) => s.ttsPaused);
   const activeSeat = useCabinStore((s) => s.activeSeat);
   const setActiveSeat = useCabinStore((s) => s.setActiveSeat);
   const setPhase = useCabinStore((s) => s.setPhase);
   const setBusy = useCabinStore((s) => s.setBusy);
   const setError = useCabinStore((s) => s.setError);
+  const setTtsPaused = useCabinStore((s) => s.setTtsPaused);
   const setVehicle = useCabinStore((s) => s.setVehicle);
   const setConfirm = useCabinStore((s) => s.setConfirm);
   const setAgentMeta = useCabinStore((s) => s.setAgentMeta);
@@ -91,15 +105,16 @@ export function CabinRuntimeProvider({ children }: { children: ReactNode }) {
   const setSessionId = useCabinStore((s) => s.setSessionId);
 
   const reloadMessages = useCallback(async () => {
-    if (!sessionId) return;
+    const id = useCabinStore.getState().sessionId;
+    if (!id) return;
     try {
-      const data = await fetchSessionMessages(sessionId, 300);
+      const data = await fetchSessionMessages(id, 300);
       setMessages(transcriptToChat(data.messages || []));
       if (data.title) useCabinStore.getState().setSessionTitle(data.title);
-    } catch {
-      /* 首次无历史时忽略 */
+    } catch (e) {
+      console.warn("reload messages failed", e);
     }
-  }, [sessionId, setMessages]);
+  }, [setMessages]);
 
   const refreshState = useCallback(async () => {
     if (!sessionId) return;
@@ -125,25 +140,40 @@ export function CabinRuntimeProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     void refreshState();
     void reloadMessages();
-    const t = window.setInterval(() => void refreshState(), 3500);
+    const t = window.setInterval(() => {
+      if (document.hidden) return;
+      void refreshState();
+    }, 3500);
     return () => window.clearInterval(t);
-  }, [refreshState, reloadMessages]);
+  }, [refreshState, reloadMessages, sessionId]);
 
   const runQuery = useCallback(
     async (query: string, confirm: boolean | null = null) => {
       const q = query.trim();
       if (!q || busy || !sessionId) return;
 
+      abortRef.current?.abort();
+      const ac = new AbortController();
+      abortRef.current = ac;
+
       stopSpeaking();
+      setTtsPaused(false);
       setBusy(true);
       setError(null);
       if (confirm == null) setConfirm(null);
       resetLive();
+      liveAnswerRef.current = "";
       setPhase(confirm == null ? "thinking" : "acting");
 
+      let userMsgId: string | null = null;
       if (confirm == null) {
-        const userMsg: ChatMessage = { id: uid(), role: "user", content: q };
-        pushMessage(userMsg);
+        userMsgId = uid();
+        pendingUserMsgIdRef.current = userMsgId;
+        pendingQueryRef.current = q;
+        pushMessage({ id: userMsgId, role: "user", content: q });
+      } else {
+        pendingUserMsgIdRef.current = null;
+        pendingQueryRef.current = q;
       }
 
       let finalAnswer = "";
@@ -152,14 +182,15 @@ export function CabinRuntimeProvider({ children }: { children: ReactNode }) {
       let earlyTtsStarted = false;
       let spokenPrefix = "";
       let ttsPromise: Promise<void> | null = null;
+      let aborted = false;
 
       const enqueueSpeak = (text: string, interrupt: boolean) => {
         const clean = (text || "").replace(/\s+/g, " ").trim();
-        if (!clean || !ttsEnabled) return;
+        if (!clean || looksLikeRawError(clean) || !ttsEnabled) return;
         setPhase("speaking");
         const run = () =>
           speakText(clean, ttsVolume, { interrupt }).catch((e) => {
-            setError(e instanceof Error ? e.message : "语音播报失败");
+            setError(publicErrorText(e instanceof Error ? e.message : "语音播报失败", "语音播报暂时不可用"));
           });
         ttsPromise = ttsPromise ? ttsPromise.then(run, run) : run();
       };
@@ -170,10 +201,12 @@ export function CabinRuntimeProvider({ children }: { children: ReactNode }) {
           model,
           confirm,
           activeSeat,
+          signal: ac.signal,
           onStatus: () => setPhase("thinking"),
           onToken: (t) => {
             appendLiveText(t);
             finalAnswer += t;
+            liveAnswerRef.current = finalAnswer;
             if (t && !t.trimStart().startsWith(">")) setPhase("acting");
             // 只抢跑 Agent 指定的【听】内容（或无标记时的可播结论）
             if (ttsEnabled && !earlyTtsStarted) {
@@ -209,6 +242,7 @@ export function CabinRuntimeProvider({ children }: { children: ReactNode }) {
             setContexts(collectedContexts);
           },
           onFinal: async (data) => {
+            if (ac.signal.aborted) return;
             const seatFromState = (data as { state?: { active_seat?: string } })?.state?.active_seat;
             const seat = (data as { active_seat?: string }).active_seat || seatFromState;
             if (isSeatId(seat)) setActiveSeat(seat);
@@ -217,6 +251,8 @@ export function CabinRuntimeProvider({ children }: { children: ReactNode }) {
             );
             const answer = extractAnswer(finalAnswer) || "好的，我这边处理好了。";
             const speakFull = extractSpeakText(finalAnswer) || answer;
+            resetLive();
+            liveAnswerRef.current = "";
             pushMessage({
               id: uid(),
               role: "assistant",
@@ -229,7 +265,9 @@ export function CabinRuntimeProvider({ children }: { children: ReactNode }) {
               ).related_images,
               contexts: fromFinal,
             });
-            resetLive();
+            // 成功落盘后仍保留 pendingQuery，播报中暂停还可撤回
+            pendingUserMsgIdRef.current = null;
+            useCabinStore.getState().bumpHistoryEpoch();
 
             if (!earlyTtsStarted) {
               enqueueSpeak(speakFull, true);
@@ -246,18 +284,51 @@ export function CabinRuntimeProvider({ children }: { children: ReactNode }) {
             void refreshState();
             if (ttsPromise) {
               setPhase("speaking");
-              void ttsPromise.finally(() => setPhase("idle"));
+              void ttsPromise.finally(() => {
+                if (!useCabinStore.getState().ttsPaused) setPhase("idle");
+              });
             } else {
               setPhase("idle");
             }
           },
-          onError: (msg) => setError(msg),
+          onError: (msg) => {
+            setError(publicErrorText(msg));
+            useCabinStore.getState().bumpHistoryEpoch();
+            void reloadMessages();
+          },
         });
       } catch (e) {
-        setError(e instanceof Error ? e.message : "请求失败");
-        setPhase("idle");
+        aborted =
+          (e instanceof DOMException && e.name === "AbortError") ||
+          (e instanceof Error && e.name === "AbortError");
+        if (aborted) {
+          // 撤回本轮发送，原文回到输入框
+          const restore = pendingQueryRef.current || q;
+          const dropId = pendingUserMsgIdRef.current || userMsgId;
+          if (dropId) {
+            const msgs = useCabinStore.getState().messages;
+            setMessages(msgs.filter((m) => m.id !== dropId));
+          }
+          pendingUserMsgIdRef.current = null;
+          pendingQueryRef.current = "";
+          liveAnswerRef.current = "";
+          resetLive();
+          setDraft(restore);
+          setError(null);
+          setPhase("idle");
+        } else {
+          setError(publicErrorText(e instanceof Error ? e.message : "请求失败"));
+          setPhase("idle");
+          useCabinStore.getState().bumpHistoryEpoch();
+          void reloadMessages();
+        }
       } finally {
+        if (abortRef.current === ac) abortRef.current = null;
         setBusy(false);
+        if (aborted) {
+          stopSpeaking();
+          setTtsPaused(false);
+        }
       }
     },
     [
@@ -268,18 +339,69 @@ export function CabinRuntimeProvider({ children }: { children: ReactNode }) {
       model,
       pushMessage,
       refreshState,
+      reloadMessages,
       resetLive,
       sessionId,
       setActiveSeat,
       setBusy,
       setConfirm,
       setContexts,
+      setDraft,
       setError,
+      setMessages,
       setPhase,
+      setTtsPaused,
       ttsEnabled,
       ttsVolume,
     ],
   );
+
+  const undoLastTurnToDraft = useCallback(() => {
+    const restore = (pendingQueryRef.current || "").trim();
+    const msgs = useCabinStore.getState().messages;
+    if (!msgs.length) {
+      if (restore) setDraft(restore);
+      pendingQueryRef.current = "";
+      pendingUserMsgIdRef.current = null;
+      return;
+    }
+    let next = [...msgs];
+    // 去掉末尾助手回复（若有）
+    if (next[next.length - 1]?.role === "assistant") {
+      next = next.slice(0, -1);
+    }
+    // 去掉对应的用户句
+    if (next[next.length - 1]?.role === "user") {
+      const lastUser = next[next.length - 1];
+      const text = restore || lastUser.content;
+      next = next.slice(0, -1);
+      setDraft(text);
+    } else if (restore) {
+      setDraft(restore);
+    }
+    setMessages(next);
+    pendingQueryRef.current = "";
+    pendingUserMsgIdRef.current = null;
+  }, [setDraft, setMessages]);
+
+  const onPauseToggle = useCallback(() => {
+    const store = useCabinStore.getState();
+    // 生成中：中止流，runQuery 的 abort 分支会撤回消息并填回输入框
+    if (store.busy) {
+      abortRef.current?.abort();
+      stopSpeaking();
+      setTtsPaused(false);
+      return;
+    }
+    // 播报中（含已点过暂停）：整轮取消，原文回输入框
+    stopSpeaking();
+    setTtsPaused(false);
+    setPhase("idle");
+    undoLastTurnToDraft();
+  }, [setPhase, setTtsPaused, undoLastTurnToDraft]);
+
+  const canPause = busy || phase === "speaking" || ttsPaused;
+  const pauseLabel = "暂停" as const;
 
   const onSubmit = (e: FormEvent) => {
     e.preventDefault();
@@ -369,7 +491,6 @@ export function CabinRuntimeProvider({ children }: { children: ReactNode }) {
     } finally {
       useCabinStore.getState().setResetInFlight(false);
     }
-    // 放行后再拉一次，确认与后端一致（此时 tick 已恢复）
     await refreshState();
   }, [clearChat, refreshState, sessionId, setVehicle]);
 
@@ -397,6 +518,7 @@ export function CabinRuntimeProvider({ children }: { children: ReactNode }) {
         }
       } catch (e) {
         setError(e instanceof Error ? e.message : "切换会话失败");
+        throw e;
       }
     },
     [
@@ -412,6 +534,25 @@ export function CabinRuntimeProvider({ children }: { children: ReactNode }) {
     ],
   );
 
+  const startNewSession = useCallback(async () => {
+    stopSpeaking();
+    setError(null);
+    const store = useCabinStore.getState();
+    store.setResetInFlight(true);
+    store.bumpVehicleEpoch();
+    try {
+      const res = await createSession();
+      if (res.state) setVehicle(res.state);
+      store.bumpMapEpoch();
+      await switchSession(res.session_id, res.title);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "新建会话失败");
+      throw e;
+    } finally {
+      useCabinStore.getState().setResetInFlight(false);
+    }
+  }, [setError, setVehicle, switchSession]);
+
   const value = useMemo(
     () => ({
       draft,
@@ -420,12 +561,30 @@ export function CabinRuntimeProvider({ children }: { children: ReactNode }) {
       onSubmit,
       onHoldStart,
       onHoldEnd,
+      onPauseToggle,
+      canPause,
+      pauseLabel,
       refreshState,
       doReset,
+      startNewSession,
       switchSession,
       reloadMessages,
     }),
-    [draft, doReset, onHoldEnd, onHoldStart, onSubmit, refreshState, reloadMessages, runQuery, switchSession],
+    [
+      canPause,
+      draft,
+      doReset,
+      onHoldEnd,
+      onHoldStart,
+      onPauseToggle,
+      onSubmit,
+      pauseLabel,
+      refreshState,
+      reloadMessages,
+      runQuery,
+      startNewSession,
+      switchSession,
+    ],
   );
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;

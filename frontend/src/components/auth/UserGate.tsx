@@ -1,5 +1,5 @@
-import { FormEvent, useEffect, useState } from "react";
-import { fetchUsers, loginUser, type UserSummary } from "@/lib/api";
+import { FormEvent, useState } from "react";
+import { loginUser } from "@/lib/api";
 import { randomNickname } from "@/lib/randomNickname";
 import { useCabinStore } from "@/store/cabinStore";
 
@@ -7,19 +7,20 @@ type Props = {
   onEntered: () => void;
 };
 
-/** 进页昵称门禁：同昵称绑定独立 session / Auto Memory */
+function readLastNickname() {
+  try {
+    return localStorage.getItem("cabin_last_nickname") || "";
+  } catch {
+    return "";
+  }
+}
+
+/** 进页昵称门禁：同昵称绑定独立 session / 用户记忆 */
 export function UserGate({ onEntered }: Props) {
-  const [nickname, setNickname] = useState("");
+  const [nickname, setNickname] = useState(readLastNickname);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [users, setUsers] = useState<UserSummary[]>([]);
   const setUser = useCabinStore((s) => s.setUser);
-
-  useEffect(() => {
-    void fetchUsers()
-      .then((r) => setUsers(r.users || []))
-      .catch(() => setUsers([]));
-  }, []);
 
   const enter = async (name: string) => {
     const nick = name.trim();
@@ -31,7 +32,7 @@ export function UserGate({ onEntered }: Props) {
     setError(null);
     try {
       const res = await loginUser(nick);
-      setUser(res.nickname, res.session_id);
+      setUser(res.nickname, res.session_id, res.is_admin);
       onEntered();
     } catch (e) {
       setError(e instanceof Error ? e.message : "进入失败");
@@ -55,7 +56,7 @@ export function UserGate({ onEntered }: Props) {
       <div className="user-gate-card">
         <em>小特 · 智能座舱</em>
         <strong>先告诉我怎么称呼你</strong>
-        <p>每个昵称拥有独立记忆与车况，换人登录互不影响。</p>
+        <p>本机记住你的昵称，下次打开会自动进入，并接上你的座舱记忆。</p>
         <form onSubmit={onSubmit}>
           <label>
             <span>昵称</span>
@@ -84,23 +85,6 @@ export function UserGate({ onEntered }: Props) {
             {busy ? "进入中…" : "进入座舱"}
           </button>
         </form>
-        {users.length ? (
-          <div className="user-gate-recent">
-            <span>最近用户</span>
-            <div className="user-gate-chips">
-              {users.slice(0, 8).map((u) => (
-                <button
-                  key={u.session_id}
-                  type="button"
-                  disabled={busy}
-                  onClick={() => void enter(u.nickname)}
-                >
-                  {u.nickname}
-                </button>
-              ))}
-            </div>
-          </div>
-        ) : null}
       </div>
     </div>
   );

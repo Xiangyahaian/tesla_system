@@ -3,7 +3,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import { useCabinStore } from "@/store/cabinStore";
 import { TurnRail } from "@/components/agent/TurnRail";
 import { AnswerBody } from "@/components/chat/AnswerBody";
-import { ContextDocs } from "@/components/chat/ContextDocs";
+import { ContextDocs, ManualImageRow } from "@/components/chat/ContextDocs";
 import { contextSourceLabel, extractAnswer } from "@/lib/answer";
 import { toShowcaseSteps } from "@/lib/trace";
 import type { ChatMessage, TraceStep } from "@/lib/types";
@@ -57,10 +57,10 @@ function ReplyDetails({
         {open ? (
           <motion.div
             className="reply-details-panel"
-            initial={{ height: 0, opacity: 0 }}
-            animate={{ height: "auto", opacity: 1 }}
-            exit={{ height: 0, opacity: 0 }}
-            transition={{ duration: 0.28, ease: [0.22, 1, 0.36, 1] }}
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.16 }}
           >
             {hasDocs && hasTrace ? (
               <div className="reply-details-tabs" role="tablist">
@@ -99,18 +99,7 @@ function ReplyDetails({
                 {imageCount > 0 ? (
                   <section className="reply-details-section" aria-label="相关插图">
                     <h4>相关插图</h4>
-                    <div className="image-row">
-                      {images!.slice(0, 3).map((img) => (
-                        <figure key={img.image_path} className="image-card">
-                          <img
-                            src={`/api/image?path=${encodeURIComponent(img.image_path)}`}
-                            alt={img.title || "手册图"}
-                            loading="lazy"
-                          />
-                          {img.title ? <figcaption>{img.title}</figcaption> : null}
-                        </figure>
-                      ))}
-                    </div>
+                    <ManualImageRow images={images!.slice(0, 6)} />
                   </section>
                 ) : null}
               </div>
@@ -149,10 +138,9 @@ export function ChatStream() {
             <motion.article
               key={m.id}
               className={`bubble ${m.role}`}
-              initial={{ opacity: 0, y: 10, scale: 0.99 }}
-              animate={{ opacity: 1, y: 0, scale: 1 }}
-              transition={{ duration: 0.28, ease: [0.22, 1, 0.36, 1] }}
-              layout
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              transition={{ duration: 0.16 }}
             >
               <header>{m.role === "user" ? "我" : "小特"}</header>
               {m.role === "assistant" ? (
@@ -175,8 +163,9 @@ export function ChatStream() {
         {(liveAnswer || liveSteps.length > 0) && (
           <motion.article
             className="bubble assistant live"
-            initial={{ opacity: 0, y: 8 }}
-            animate={{ opacity: 1, y: 0 }}
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            transition={{ duration: 0.16 }}
           >
             <header>小特 · 正在回复</header>
             {liveSteps.length > 0 && !liveAnswer ? (

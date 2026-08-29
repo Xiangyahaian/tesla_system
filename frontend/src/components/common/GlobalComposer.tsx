@@ -4,7 +4,7 @@ import { useCabinStore } from "@/store/cabinStore";
 
 /** Floating composer available on Apps/Agent/Settings without leaving context */
 export function GlobalComposer() {
-  const { runQuery } = useCabinRuntime();
+  const { runQuery, onPauseToggle, canPause, pauseLabel } = useCabinRuntime();
   const busy = useCabinStore((s) => s.busy);
   const phase = useCabinStore((s) => s.phase);
   const [open, setOpen] = useState(false);
@@ -62,6 +62,11 @@ export function GlobalComposer() {
           <button type="button" className="btn ghost compact" onClick={() => setOpen(false)}>
             取消
           </button>
+          {canPause ? (
+            <button type="button" className="btn ghost compact pause-btn" onClick={() => onPauseToggle()}>
+              {pauseLabel}
+            </button>
+          ) : null}
           <button type="submit" className="btn primary compact" disabled={busy || !text.trim()}>
             发送
           </button>

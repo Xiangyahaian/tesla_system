@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
-"""编排：Claude Code 风格 Agent Harness + 车载专用路径。
+"""编排：Agent 运行时 + 车载专用路径。
 
 每轮：
   1) 写入 user transcript
   2) 分层 compact（如需要）
-  3) assemble context（CABIN.md / MEMORY / vehicle / recent）
+  3) assemble context（人设 / 记忆 / 偏好 / vehicle / recent）
   4) NLU 逐步规划（每步可并行无依赖工具；有依赖则拆步）
   5) tool → AgentLoop（observe 后再规划）；其它路径专用 handler
   6) 写入 assistant/tool transcript + 持久化 session
@@ -12,35 +12,47 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
+import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, Generator, List, Optional
+from typing import Any, Dict, Generator, List, Optional, Tuple
 
 from app import config
 from app.agent.hooks import HookBus
 from app.agent.loop import AgentLoop
 from app.agent.persona import (
-    CHAT_FALLBACK,
     CHAT_STYLE,
     KNOWLEDGE_EMPTY,
     KNOWLEDGE_STYLE,
     SEARCH_STYLE,
     TOOL_WRAP_STYLE,
 )
+from app.agent.speech_guard import (
+    DEFAULT_SPOKEN,
+    classify_and_speak,
+    looks_like_raw_error,
+    public_error_text,
+    sanitize_spoken,
+)
 from app.agent.trace import StepType, TurnTrace
 from app.agent.types import MessageRole
-from app.llm.client import LLMClient, get_llm
-from app.models import IntentType, PendingAction, RouteResult, ToolCall, ToolResult
+from app.llm.client import LLMClient, classify_llm_error, compose_llm_fail_reply, get_llm
+from app.models import IntentType, PendingAction, ProfileUpdatePlan, RouteResult, ToolCall, ToolResult
 from app.nlu.fast_path import (
-    try_combo_cabin_utterance,
+    chat_web_query,
+    is_pending_hold_utterance,
+    try_app_utterance,
     try_confirm_utterance,
     try_direct_cabin_utterance,
+    try_fast_path_route,
+    try_greeting_reply,
     try_nearby_utterance,
-    try_nav_candidate_utterance,
-    try_preference_utterance,
     try_status_utterance,
+    try_web_search_utterance,
 )
+from app.nlu.nav_resolve import format_clarify_speech, resolve_nav_selection
 from app.nlu.planner import StructuredNLU
 from app.nlu.seat_context import (
     SEAT_CN,
@@ -48,11 +60,12 @@ from app.nlu.seat_context import (
     apply_memory_climate_defaults,
     normalize_active_seat,
 )
-from app.agent.memory import build_preference_tool_calls
 from app.policy.engine import PolicyEngine
 from app.rag.service import RagService, get_rag_service
 from app.session.store import SessionData, get_session_store
 from app.tools.registry import get_registry
+
+_log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -70,18 +83,74 @@ class TurnMetrics:
     context_chars: int = 0
     loop_iters: int = 0
     turn_id: str = ""
+    llm_used: bool = False
+    prompt_chars: int = 0
+    completion_chars: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    llm_elapsed_ms: int = 0
+    token_source: str = "none"
+    prompts: List[Dict[str, Any]] = field(default_factory=list)
+    llm: Any = field(default=None, repr=False, compare=False)
+    profile_plan: ProfileUpdatePlan = field(default_factory=ProfileUpdatePlan)
 
 
 def _ts() -> str:
     return time.strftime("%H:%M:%S")
 
 
+def _absorb_llm(m: TurnMetrics) -> None:
+    llm = m.llm
+    extra: List[Dict[str, Any]] = []
+    if llm is not None and hasattr(llm, "drain_usage"):
+        try:
+            extra = list(llm.drain_usage() or [])
+        except Exception:
+            extra = []
+    if extra:
+        m.prompts.extend(extra)
+    if m.prompts:
+        m.llm_used = True
+        m.llm_calls = len(m.prompts)
+        m.prompt_chars = sum(int(c.get("prompt_chars") or 0) for c in m.prompts)
+        m.completion_chars = sum(int(c.get("completion_chars") or 0) for c in m.prompts)
+        m.prompt_tokens = sum(int(c.get("prompt_tokens") or 0) for c in m.prompts)
+        m.completion_tokens = sum(int(c.get("completion_tokens") or 0) for c in m.prompts)
+        m.total_tokens = sum(int(c.get("total_tokens") or 0) for c in m.prompts)
+        m.llm_elapsed_ms = sum(int(c.get("elapsed_ms") or 0) for c in m.prompts)
+        sources = {str(c.get("token_source") or "none") for c in m.prompts}
+        m.token_source = next(iter(sources)) if len(sources) == 1 else "mixed"
+        m.context_chars = m.prompt_chars
+    else:
+        m.llm_used = False
+        m.llm_calls = 0
+        m.prompt_chars = 0
+        m.completion_chars = 0
+        m.prompt_tokens = 0
+        m.completion_tokens = 0
+        m.total_tokens = 0
+        m.llm_elapsed_ms = 0
+        m.token_source = "none"
+        m.context_chars = 0
+
+
 def _metrics_dict(m: TurnMetrics) -> Dict[str, Any]:
+    _absorb_llm(m)
     return {
+        "llm_used": m.llm_used,
         "llm_calls": m.llm_calls,
         "loop_iters": m.loop_iters,
         "compact_layers": m.compact_layers,
-        "context_chars": m.context_chars,
+        "prompt_chars": m.prompt_chars,
+        "completion_chars": m.completion_chars,
+        "prompt_tokens": m.prompt_tokens,
+        "completion_tokens": m.completion_tokens,
+        "total_tokens": m.total_tokens,
+        "llm_elapsed_ms": m.llm_elapsed_ms,
+        "token_source": m.token_source,
+        "prompts": m.prompts,
+        "context_chars": m.prompt_chars,
         "tools": m.tools,
     }
 
@@ -96,11 +165,44 @@ class Orchestrator:
             self.registry, self.policy, max_iterations=config.AGENT_MAX_LOOP_ITERS
         )
         self._rag: Optional[RagService] = None
+        self._session_locks: Dict[str, threading.Lock] = {}
+        self._session_locks_guard = threading.Lock()
+
+    def _get_session_lock(self, session_id: str) -> threading.Lock:
+        key = str(session_id or "default")
+        with self._session_locks_guard:
+            lock = self._session_locks.get(key)
+            if lock is None:
+                lock = threading.Lock()
+                self._session_locks[key] = lock
+            return lock
 
     def _get_rag(self) -> RagService:
         if self._rag is None:
             self._rag = get_rag_service()
         return self._rag
+
+    def finalize_open_turn(self, session_id: str, error: str = "") -> bool:
+        """上一轮若只写下用户句就中断，补一条助手说明，避免历史缺回复。"""
+        try:
+            sess = self.store.get(session_id, touch=False)
+        except Exception:
+            return False
+        msgs = sess.transcript.load()
+        if not msgs or msgs[-1].role != MessageRole.USER:
+            return False
+        raw = (error or "").strip().replace("\n", " ")
+        if raw.lower() in {"cancelled", "canceled", "generator exit"}:
+            raw = ""
+        if raw and "中断" in raw:
+            note = "刚才这句我没答完，刷新或下一条会接上。"
+        elif raw:
+            note = public_error_text(raw)
+        else:
+            note = "刚才这句我没答完，刷新或下一条会接上。"
+        sess.transcript.append(MessageRole.ASSISTANT, sanitize_spoken(f"【听】{note}"))
+        self.store.save(sess)
+        return True
 
     def handle(
         self,
@@ -110,47 +212,103 @@ class Orchestrator:
         confirm: Optional[bool] = None,
         active_seat: Optional[str] = None,
     ) -> Generator[StreamEvent, None, TurnMetrics]:
+        lock = self._get_session_lock(session_id)
+        if not lock.acquire(blocking=False):
+            metrics = TurnMetrics()
+            msg = "【听】上一句还在处理，稍等一下再发就行，不用重置会话。"
+            yield StreamEvent("status", "busy")
+            yield from self._emit_text(msg)
+            yield StreamEvent(
+                "final",
+                {
+                    "busy": True,
+                    "cite_pages": [],
+                    "related_images": [],
+                    "state": {},
+                },
+            )
+            return metrics
+        try:
+            return (yield from self._handle_locked(query, session_id, model, confirm, active_seat))
+        except Exception as e:
+            yield from self._emit_uncaught_failure(session_id, e, model)
+            return TurnMetrics()
+        finally:
+            try:
+                lock.release()
+            except RuntimeError:
+                pass
+
+    def _emit_uncaught_failure(self, session_id: str, exc: BaseException, model: str):
+        mode = model if model in {"remote", "local"} else "remote"
+        info = classify_and_speak(exc, mode=mode)
+        msg = info.get("spoken") or DEFAULT_SPOKEN
+        _log.exception("uncaught turn failure session=%s", session_id)
+        try:
+            sess = self.store.get(session_id, touch=False)
+            turn = TurnTrace(session_id=session_id, query="", model=model)
+            yield from self._trace(turn, StepType.ERROR, "本轮未捕获异常", info, status="error")
+            turn.finish(status="error", answer_preview=msg)
+            sess.traces.append_turn(turn)
+            last = (sess.transcript.load() or [None])[-1]
+            if last is not None and last.role == MessageRole.USER:
+                sess.transcript.append(MessageRole.ASSISTANT, msg)
+            self.store.save(sess)
+        except Exception:
+            _log.exception("uncaught failure persist failed session=%s", session_id)
+        yield from self._emit_text(msg)
+        yield StreamEvent(
+            "final",
+            {"cite_pages": [], "related_images": [], "state": {}, "error": True},
+        )
+
+    def _handle_locked(
+        self,
+        query: str,
+        session_id: str = "default",
+        model: str = "remote",
+        confirm: Optional[bool] = None,
+        active_seat: Optional[str] = None,
+    ) -> Generator[StreamEvent, None, TurnMetrics]:
         metrics = TurnMetrics()
         sess = self.store.get(session_id)
+        self.finalize_open_turn(session_id, "上一轮回答中断了。")
         llm = get_llm(model)
+        metrics.llm = llm
         q = (query or "").strip()
 
-        # Claude Code 同款：先确定性写入偏好，再解析生效座位
-        pref_delta = sess.memory.ingest_utterance(q)
         seat, seat_src = sess.memory.resolve_active_seat(active_seat or sess.slots.get("active_seat"), q)
-        if pref_delta.preferred_seat:
-            seat = normalize_active_seat(pref_delta.preferred_seat)
-            seat_src = "memory"
         sess.slots["active_seat"] = seat
         turn = TurnTrace(session_id=session_id, query=q, model=model)
         metrics.turn_id = turn.turn_id
+
+        if str(model or "remote") == "local":
+            ping = llm.ping()
+            if not ping.get("ok"):
+                info = classify_and_speak(str(ping.get("error") or "本地模型未就绪"), mode="local")
+                msg = info.get("spoken") or "【听】本地模型这会儿还没就绪。请先在 GPU 电脑启动 vLLM。"
+                yield from self._trace(turn, StepType.ERROR, "本地模型不可用", info, status="error")
+                yield StreamEvent("status", "本地模型不可用")
+                sess.transcript.append(MessageRole.USER, q)
+                sess.transcript.append(MessageRole.ASSISTANT, msg)
+                yield from self._emit_text(msg)
+                yield StreamEvent(
+                    "final",
+                    {
+                        "turn_id": turn.turn_id,
+                        "cite_pages": [],
+                        "related_images": [],
+                        "state": self._state_summary(sess),
+                    },
+                )
+                yield from self._persist_turn(sess, llm, q, metrics, turn)
+                return metrics
 
         yield StreamEvent("status", "Agent 上下文准备中...")
         yield StreamEvent(
             "active_seat",
             {"active_seat": seat, "active_seat_cn": SEAT_CN.get(seat, seat), "source": seat_src},
         )
-        if pref_delta.applied:
-            yield from self._trace(
-                turn,
-                StepType.MEMORY,
-                "写入 Auto Memory / preferences",
-                {
-                    "preferred_seat": pref_delta.preferred_seat,
-                    "climate_temps": pref_delta.climate_temps,
-                    "notes": pref_delta.notes[:4],
-                },
-            )
-            yield StreamEvent(
-                "memory",
-                {
-                    "preferences": sess.memory.load_preferences(),
-                    "delta": {
-                        "preferred_seat": pref_delta.preferred_seat,
-                        "climate_temps": pref_delta.climate_temps,
-                    },
-                },
-            )
         yield from self._trace(
             turn,
             StepType.SESSION,
@@ -164,7 +322,7 @@ class Orchestrator:
             },
         )
         yield from self._emit_text(
-            f"> **[{_ts()}] Agent Harness** · turn `{turn.turn_id}` · session `{session_id}`"
+            f"> **[{_ts()}] 座舱编排** · turn `{turn.turn_id}` · session `{session_id}`"
             f" · seat `{SEAT_CN.get(seat, seat)}` ({seat_src})\n>\n"
         )
 
@@ -175,8 +333,43 @@ class Orchestrator:
             do_cancel = confirm is False or (confirm_route and confirm_route.intent == IntentType.CANCEL)
             if do_confirm:
                 pending = sess.pending
-                sess.pending = None
                 privacy = (getattr(pending, "confirm_kind", None) or "safety") == "privacy"
+                # 确认时车况可能已变：重新过策略，不允许就清 pending 并说明
+                try:
+                    live_state = sess.gateway.snapshot()
+                except Exception:
+                    live_state = {}
+                recheck = self.policy.evaluate(pending.tool_calls, live_state)
+                if not recheck.allowed:
+                    sess.pending = None
+                    sess.transcript.append(MessageRole.USER, q, kind="confirm")
+                    msg = f"【听】{recheck.message or recheck.blocked_reason or '当前车况下不能执行刚才那步，先不做了。'}"
+                    sess.transcript.append(MessageRole.ASSISTANT, msg)
+                    yield from self._trace(
+                        turn,
+                        StepType.CONFIRM,
+                        "确认后策略重检拦截",
+                        {
+                            "summary": pending.summary,
+                            "blocked_reason": recheck.blocked_reason,
+                        },
+                        status="warn",
+                    )
+                    yield from self._commit_turn(sess, turn, metrics, "blocked", msg)
+                    yield from self._persist_turn(sess, llm, q, metrics, turn)
+                    yield from self._emit_text(msg)
+                    yield StreamEvent(
+                        "final",
+                        {
+                            "turn_id": turn.turn_id,
+                            "blocked": True,
+                            "cite_pages": [],
+                            "related_images": [],
+                            "state": self._state_summary(sess),
+                        },
+                    )
+                    return metrics
+                sess.pending = None
                 sess.transcript.append(MessageRole.USER, q, kind="confirm")
                 yield from self._trace(
                     turn,
@@ -243,6 +436,8 @@ class Orchestrator:
                         continue
                     # 多行结果每一行都加 >，避免漏进对话框
                     dump = (result.message or "").strip() or "(无输出)"
+                    if looks_like_raw_error(dump):
+                        dump = "执行失败（原文已写入轨迹）"
                     for line in dump.splitlines() or ["(无输出)"]:
                         yield from self._emit_text(f"> `{call.name}` → {line}\n")
                 if message_contexts:
@@ -254,14 +449,19 @@ class Orchestrator:
                         {"doc_count": len(message_contexts), "kind": "message"},
                     )
                 raw_msg = self._format_tool_results(results)
-                msg = self._warm_tool_reply(llm, q, raw_msg, results=results)
+                msg = self._warm_tool_reply(llm, q, raw_msg, results=results, sess=sess)
                 metrics.llm_calls += 1
+                tool_names = [c.name for c in pending.tool_calls]
+                self._sync_unread_nudge_after_notifications(sess, tool_names, results)
+                skip_nudge = self._should_skip_unread_nudge(q, tool_names)
+                msg, nudged = self._apply_unread_visual_nudge(sess, msg, skip=skip_nudge)
                 sess.transcript.append(MessageRole.ASSISTANT, msg)
                 metrics.intent = "tool"
-                metrics.tools = [c.name for c in pending.tool_calls]
+                metrics.tools = tool_names
                 yield from self._commit_turn(sess, turn, metrics, "ok", msg)
-                self.store.save(sess)
+                yield from self._persist_turn(sess, llm, q, metrics, turn)
                 yield from self._emit_text("\n" + msg)
+                nudge = self._unread_nudge_payload(sess, nudged)
                 yield StreamEvent(
                     "final",
                     {
@@ -271,6 +471,7 @@ class Orchestrator:
                         "related_images": [],
                         "contexts": message_contexts,
                         "state": self._state_summary(sess),
+                        **({"visual_nudge": nudge} if nudge else {}),
                     },
                 )
                 return metrics
@@ -292,7 +493,7 @@ class Orchestrator:
                     {"confirm_kind": "privacy" if privacy else "safety"},
                 )
                 yield from self._commit_turn(sess, turn, metrics, "cancelled", msg)
-                self.store.save(sess)
+                yield from self._persist_turn(sess, llm, q, metrics, turn)
                 yield from self._emit_text(msg)
                 yield StreamEvent(
                     "final",
@@ -305,12 +506,70 @@ class Orchestrator:
                     },
                 )
                 return metrics
+            # 短糊糊话：保留 pending，提示用户确认/取消
+            if is_pending_hold_utterance(q):
+                pending = sess.pending
+                privacy = (getattr(pending, "confirm_kind", None) or "safety") == "privacy"
+                sess.transcript.append(MessageRole.USER, q, kind="confirm_hold")
+                tip = pending.message or (
+                    "要不要我读一下消息？说「确认」或「取消」。"
+                    if privacy
+                    else "刚才那步需要你确认后才能动。可以说「确认」或「取消」。"
+                )
+                msg = f"【听】{tip}"
+                sess.transcript.append(MessageRole.ASSISTANT, msg)
+                yield from self._trace(
+                    turn,
+                    StepType.CONFIRM,
+                    "保留待确认动作",
+                    {"summary": pending.summary, "confirm_kind": getattr(pending, "confirm_kind", "safety")},
+                )
+                yield from self._commit_turn(sess, turn, metrics, "await_confirm", msg)
+                yield from self._persist_turn(sess, llm, q, metrics, turn)
+                yield from self._emit_text(msg)
+                yield StreamEvent(
+                    "final",
+                    {
+                        "turn_id": turn.turn_id,
+                        "await_confirm": True,
+                        "cite_pages": [],
+                        "related_images": [],
+                        "state": self._state_summary(sess),
+                    },
+                )
+                return metrics
+            # 明确新指令：覆盖 pending，并口语告知，避免「以为还在等确认」
+            override_note = "刚才那步先不算了，按你这句新的来。"
             sess.pending = None
             yield from self._trace(turn, StepType.CONFIRM, "新指令覆盖未确认动作", status="warn")
-            yield from self._emit_text(f"> **[{_ts()}] 新指令覆盖未确认动作**\n\n---\n\n")
+            yield from self._emit_text(
+                f"> **[{_ts()}] 新指令覆盖未确认动作**\n>\n> {override_note}\n\n---\n\n"
+            )
+            sess.slots["_pending_override_note"] = override_note
 
         # 1) append user turn
         sess.transcript.append(MessageRole.USER, q)
+
+        greet = try_greeting_reply(q)
+        if greet:
+            metrics.intent = "chat"
+            greet = self._with_continuity_prefix(sess, greet)
+            sess.transcript.append(MessageRole.ASSISTANT, greet)
+            yield from self._trace(turn, StepType.CHAT, "寒暄直达")
+            yield from self._emit_text(greet)
+            yield from self._commit_turn(sess, turn, metrics, "ok", greet)
+            yield from self._persist_turn(sess, llm, q, metrics, turn)
+            yield StreamEvent(
+                "final",
+                {
+                    "turn_id": turn.turn_id,
+                    "cite_pages": [],
+                    "related_images": [],
+                    "state": self._state_summary(sess),
+                    "active_seat": seat,
+                },
+            )
+            return metrics
 
         # 2) compact if needed
         report = self.store.maybe_compact(sess, llm=llm, force=False)
@@ -336,7 +595,6 @@ class Orchestrator:
 
         # 3) assemble context
         bundle = self.store.assemble_context(sess)
-        metrics.context_chars = bundle.total_chars
         yield from self._trace(
             turn,
             StepType.CONTEXT,
@@ -350,37 +608,101 @@ class Orchestrator:
 
         # 4) NLU（无歧义舱体/周边/偏好/一句话多工具可直达）
         memory_hint = self.store.assembler.memory_hint(bundle, sess.transcript)
-        pref_block = sess.memory.format_preferences_block()
-        if pref_block:
-            memory_hint = f"{pref_block}\n{memory_hint}"
 
-        direct = (
-            try_nav_candidate_utterance(q, sess.slots.get("nav_candidates"))
-            or try_status_utterance(q)
-            or try_combo_cabin_utterance(q)
-            or try_preference_utterance(q)
-            or try_direct_cabin_utterance(q)
-            or try_nearby_utterance(q)
-        )
-        # 偏好句：注入温控工具，保证仪表立刻变化
-        if direct is not None and direct.reason == "记忆偏好并应用":
-            tools = build_preference_tool_calls(pref_delta)
-            if tools:
+        # 系统性门禁：有待澄清导航候选时，只在候选集合内解释用户话，
+        # 禁止 NLU 改写成新地名再全市检索（否则会二次歧义）。
+        pending_nav = [
+            c
+            for c in (sess.slots.get("nav_candidates") or [])
+            if isinstance(c, dict) and str(c.get("name") or "").strip()
+        ]
+        if pending_nav:
+            sel = resolve_nav_selection(
+                q,
+                pending_nav,
+                llm=llm,
+                query_label=str(sess.slots.get("nav_clarify_query") or ""),
+            )
+            if sel.used_llm:
+                metrics.llm_calls += 1
+            if sel.action == "navigate":
+                args: Dict[str, Any] = {
+                    "destination": sel.destination,
+                    "preference": "fastest",
+                }
+                loc = (sel.location or "").strip()
+                if loc and "," in loc:
+                    args["destination_location"] = loc
                 direct = RouteResult(
-                    intent=IntentType.MULTI_TOOL if len(tools) > 1 else IntentType.TOOL,
+                    intent=IntentType.TOOL,
                     confidence=0.99,
-                    reason="记忆偏好并应用",
-                    tool_calls=tools,
+                    reason=f"选择导航候选·{sel.reason}",
+                    tool_calls=[
+                        ToolCall(
+                            name="navigation.navigate_to",
+                            arguments=args,
+                            reason=f"用户选定：{sel.destination}",
+                        )
+                    ],
+                    done=True,
                 )
-            else:
-                # 只更新座位记忆等：直接确认，不进空工具
-                msg = self._pref_ack(pref_delta)
-                metrics.intent = "memory"
-                yield from self._trace(turn, StepType.INTENT, "记忆偏好", {"reason": "仅写入记忆"})
+                yield from self._emit_text(f"> **[{_ts()}] FastPath**: 导航候选选定（跳过 NLU）\n>\n")
+                metrics.intent = direct.intent.value
+                metrics.tools = [c.name for c in direct.tool_calls]
+                yield from self._trace(
+                    turn,
+                    StepType.INTENT,
+                    "选择导航候选",
+                    {
+                        "intent": direct.intent.value,
+                        "confidence": direct.confidence,
+                        "reason": direct.reason,
+                        "selection_reason": sel.reason,
+                        "used_llm": sel.used_llm,
+                        "tool_calls": [c.model_dump() for c in direct.tool_calls],
+                    },
+                )
+                yield StreamEvent(
+                    "intent",
+                    {
+                        "turn_id": turn.turn_id,
+                        "type": direct.intent.value,
+                        "confidence": direct.confidence,
+                        "reason": direct.reason,
+                        "active_seat": seat,
+                        "tool_calls": [c.model_dump() for c in direct.tool_calls],
+                    },
+                )
+                yield from self._handle_tools(
+                    sess, q, direct, llm, memory_hint, metrics, turn, active_seat=seat
+                )
+                yield from self._persist_turn(sess, llm, q, metrics, turn)
+                return metrics
+
+            if sel.action in {"narrow", "repeat"}:
+                use_cands = sel.candidates or pending_nav
+                if sel.action == "narrow":
+                    sess.slots["nav_candidates"] = use_cands
+                label = str(sess.slots.get("nav_clarify_query") or "那里")
+                msg = f"【听】{format_clarify_speech(label, use_cands)}"
+                metrics.intent = "tool"
+                yield from self._trace(
+                    turn,
+                    StepType.INTENT,
+                    "导航候选仍需澄清",
+                    {
+                        "action": sel.action,
+                        "reason": sel.reason,
+                        "used_llm": sel.used_llm,
+                        "candidates": [
+                            {"name": c.get("name"), "index": c.get("index")} for c in use_cands
+                        ],
+                    },
+                )
                 sess.transcript.append(MessageRole.ASSISTANT, msg)
                 yield from self._emit_text(msg)
                 yield from self._commit_turn(sess, turn, metrics, "ok", msg)
-                self.store.save(sess)
+                yield from self._persist_turn(sess, llm, q, metrics, turn)
                 yield StreamEvent(
                     "final",
                     {
@@ -393,16 +715,29 @@ class Orchestrator:
                 )
                 return metrics
 
+            if sel.action == "clear":
+                sess.slots.pop("nav_candidates", None)
+                sess.slots.pop("nav_clarify_query", None)
+            elif sel.action == "new_destination":
+                # 明确换目的地：清掉旧候选，走正常导航规划
+                sess.slots.pop("nav_candidates", None)
+                sess.slots.pop("nav_clarify_query", None)
+
+        direct = try_fast_path_route(q, sess.slots.get("nav_candidates"))
+
         if direct is not None:
             route = direct
+            self._capture_profile_plan(metrics, route)
             metrics.intent = route.intent.value
             metrics.tools = [c.name for c in route.tool_calls]
-            if any(c.name.startswith("maps.") for c in route.tool_calls):
+            if route.intent == IntentType.SEARCH:
+                fast_tag = "status"
+            elif any(c.name.startswith("maps.") for c in route.tool_calls):
                 fast_tag = "nearby"
+            elif any(c.name.startswith("web.") for c in route.tool_calls):
+                fast_tag = "web"
             elif any(c.name.startswith("navigation.") for c in route.tool_calls):
                 fast_tag = "combo" if len(route.tool_calls) > 1 else "nav"
-            elif route.reason == "记忆偏好并应用":
-                fast_tag = "memory"
             else:
                 fast_tag = "cabin"
             yield from self._trace(
@@ -416,6 +751,7 @@ class Orchestrator:
                     "active_seat": seat,
                     "tool_calls": [c.model_dump() for c in route.tool_calls],
                     "fast_path": fast_tag,
+                    "profile_update": route.profile_update.model_dump(),
                 },
             )
             yield from self._emit_text(
@@ -435,30 +771,30 @@ class Orchestrator:
                     "compact_layers": metrics.compact_layers,
                 },
             )
+            # 车况直达（在哪/空调开没开等）没有 tool_calls，必须走 SEARCH；
+            # 不能当成「空工具 = 记偏好」，否则会回「偏好已记下来…再说空调」。
+            if route.intent == IntentType.SEARCH:
+                yield from self._handle_search(sess, q, llm, metrics, bundle, turn, active_seat=seat)
+                yield from self._persist_turn(sess, llm, q, metrics, turn)
+                return metrics
+            if route.intent == IntentType.KNOWLEDGE:
+                yield from self._handle_knowledge(sess, q, llm, metrics, turn)
+                yield from self._persist_turn(sess, llm, q, metrics, turn)
+                return metrics
+            if route.intent == IntentType.CHAT:
+                yield from self._handle_chat(sess, q, llm, metrics, bundle, turn)
+                yield from self._persist_turn(sess, llm, q, metrics, turn)
+                return metrics
             if route.tool_calls:
                 yield from self._handle_tools(sess, q, route, llm, memory_hint, metrics, turn, active_seat=seat)
-            else:
-                msg = self._pref_ack(pref_delta)
-                sess.transcript.append(MessageRole.ASSISTANT, msg)
-                yield from self._emit_text(msg)
-                yield from self._commit_turn(sess, turn, metrics, "ok", msg)
-                yield StreamEvent(
-                    "final",
-                    {
-                        "turn_id": turn.turn_id,
-                        "cite_pages": [],
-                        "related_images": [],
-                        "state": self._state_summary(sess),
-                        "active_seat": seat,
-                    },
-                )
-            self.store.save(sess)
+            yield from self._persist_turn(sess, llm, q, metrics, turn)
             return metrics
 
         yield from self._emit_text(f"> **[{_ts()}] StructuredNLU（语义规划）...**\n>\n")
         yield StreamEvent("status", "规划中...")
         nlu = StructuredNLU(llm, self.registry)
         route = nlu.plan(q, sess.gateway.snapshot(), memory_hint, active_seat=seat)
+        self._capture_profile_plan(metrics, route)
         metrics.llm_calls += 1
         metrics.intent = route.intent.value
         metrics.tools = [c.name for c in route.tool_calls]
@@ -472,11 +808,66 @@ class Orchestrator:
                 "reason": route.reason,
                 "active_seat": seat,
                 "tool_calls": [c.model_dump() for c in route.tool_calls],
+                "profile_update": route.profile_update.model_dump(),
             },
         )
+        # NLU 断连/低置信闲聊：先试直达指令，避免闲聊瞎编「导航已启动」
+        if route.intent == IntentType.CHAT and (
+            str(route.reason).startswith("NLU失败") or route.confidence < 0.35
+        ):
+            from app.nlu.destination_guard import should_skip_code_fast_path
+
+            recovery = None
+            if not should_skip_code_fast_path(q):
+                recovery = (
+                    try_app_utterance(q)
+                    or try_nearby_utterance(q)
+                    or try_web_search_utterance(q)
+                    or try_status_utterance(q)
+                    or try_direct_cabin_utterance(q)
+                )
+            if recovery is not None:
+                route = recovery
+                metrics.intent = route.intent.value
+                metrics.tools = [c.name for c in route.tool_calls]
+                yield from self._trace(
+                    turn,
+                    StepType.INTENT,
+                    f"断连恢复 {route.intent.value}",
+                    {
+                        "intent": route.intent.value,
+                        "confidence": route.confidence,
+                        "reason": route.reason,
+                        "tool_calls": [c.model_dump() for c in route.tool_calls],
+                    },
+                )
+            elif str(route.reason).startswith("NLU失败"):
+                info = classify_llm_error(str(route.reason), mode=getattr(llm, "mode", "remote"))
+                yield from self._trace(turn, StepType.ERROR, "意图规划失败", info, status="error")
+                msg = compose_llm_fail_reply(info)
+                metrics.intent = "chat"
+                sess.transcript.append(MessageRole.ASSISTANT, msg)
+                yield from self._emit_text(msg)
+                yield from self._commit_turn(sess, turn, metrics, "error", msg)
+                yield from self._persist_turn(sess, llm, q, metrics, turn)
+                yield StreamEvent(
+                    "final",
+                    {
+                        "turn_id": turn.turn_id,
+                        "cite_pages": [],
+                        "related_images": [],
+                        "state": self._state_summary(sess),
+                        "active_seat": seat,
+                    },
+                )
+                return metrics
+
+        reason_shown = route.reason
+        if looks_like_raw_error(reason_shown):
+            reason_shown = reason_shown.split("|", 1)[0].strip() or "规划失败"
         yield from self._emit_text(
             f"> **[{_ts()}] 意图**: `{route.intent.value}` "
-            f"(置信度 {route.confidence:.2f}) · {route.reason}\n\n---\n\n"
+            f"(置信度 {route.confidence:.2f}) · {reason_shown}\n\n---\n\n"
         )
         yield StreamEvent(
             "intent",
@@ -494,24 +885,20 @@ class Orchestrator:
 
         if route.intent in {IntentType.TOOL, IntentType.MULTI_TOOL}:
             yield from self._handle_tools(sess, q, route, llm, memory_hint, metrics, turn, active_seat=seat)
-            self.store.save(sess)
+            yield from self._persist_turn(sess, llm, q, metrics, turn)
             return metrics
 
         if route.intent == IntentType.SEARCH:
             yield from self._handle_search(sess, q, llm, metrics, bundle, turn, active_seat=seat)
-            self._post_turn_memory(sess, llm, q, metrics, turn)
-            self.store.save(sess)
+            yield from self._persist_turn(sess, llm, q, metrics, turn)
             return metrics
 
         if route.intent == IntentType.KNOWLEDGE:
             yield from self._handle_knowledge(sess, q, llm, metrics, turn)
-            self._post_turn_memory(sess, llm, q, metrics, turn)
-            self.store.save(sess)
+            yield from self._persist_turn(sess, llm, q, metrics, turn)
             return metrics
 
         yield from self._handle_chat(sess, q, llm, metrics, bundle, turn)
-        self._post_turn_memory(sess, llm, q, metrics, turn)
-        self.store.save(sess)
         return metrics
 
     def _trace(
@@ -537,33 +924,93 @@ class Orchestrator:
             status=status,
             intent=metrics.intent,
             metrics=_metrics_dict(metrics),
-            answer_preview=answer,
+            answer_preview=sanitize_spoken(answer) if looks_like_raw_error(answer) else answer,
             tool_names=list(metrics.tools),
         )
         sess.traces.append_turn(turn)
         yield StreamEvent("turn", turn.summary())
 
-    def _post_turn_memory(
+    def _capture_profile_plan(self, metrics: TurnMetrics, route: RouteResult) -> None:
+        metrics.profile_plan = route.profile_update
+
+    def _persist_turn(
         self,
         sess: SessionData,
-        llm: LLMClient,
+        llm: Optional[LLMClient],
         query: str,
         metrics: TurnMetrics,
         turn: Optional[TurnTrace] = None,
     ):
-        if not config.AGENT_ENABLE_AUTO_MEMORY:
-            return
-        msgs = sess.transcript.load()
-        assistant = ""
-        for m in reversed(msgs):
-            if m.role == MessageRole.ASSISTANT:
-                assistant = m.content
-                break
-        note = sess.memory.maybe_extract(llm, query, assistant)
-        if note:
-            metrics.llm_calls += 1
-            if turn is not None:
-                turn.add(StepType.MEMORY, "写入 Auto Memory", {"note": note})
+        """轮末：主干已结束；仅当首轮意图判定需更新时，加载现有记录并调 LLM 合并落盘。"""
+        if llm and (query or "").strip() and config.AGENT_ENABLE_AUTO_MEMORY:
+            assistant = ""
+            try:
+                for m in reversed(sess.transcript.load()):
+                    if m.role == MessageRole.ASSISTANT:
+                        assistant = re.sub(r"^【听】\s*", "", (m.content or "").strip())
+                        break
+                if not assistant:
+                    for m in reversed(sess.transcript.load()):
+                        if m.role == MessageRole.TOOL:
+                            assistant = (m.content or "")[:400]
+                            break
+                from app.agent.profile_extract import profile_step_title
+
+                report = sess.memory.extract_after_turn(
+                    llm, query, assistant, profile_plan=metrics.profile_plan
+                )
+                metrics.llm_calls += report.llm_calls
+                detail = {
+                    "source": "intent_first_pass",
+                    "intent_decision": report.intent_decision,
+                    "persona_updated": report.persona_updated,
+                    "memories_updated": report.memories_updated,
+                    "preferences_updated": report.preferences_updated,
+                    "notes": report.notes,
+                    "update_steps": report.update_steps,
+                }
+                if report.persona_updated or report.memories_updated or report.preferences_updated:
+                    if turn is not None:
+                        turn.add(
+                            StepType.MEMORY,
+                            profile_step_title(
+                                report.persona_updated,
+                                report.memories_updated,
+                                report.preferences_updated,
+                            ),
+                            detail,
+                        )
+                    yield StreamEvent(
+                        "profile",
+                        {
+                            **detail,
+                            "persona": sess.memory.load_persona(),
+                            "memories": sess.memory.load_memories(),
+                            "preferences": sess.memory.load_preferences(),
+                        },
+                    )
+                elif report.intent_decision.get("source") and turn is not None:
+                    if metrics.profile_plan.needs_work():
+                        turn.add(
+                            StepType.MEMORY,
+                            profile_step_title(skipped=True),
+                            detail,
+                            status="warn",
+                        )
+                    # 首轮未触发：不写入轨迹，避免噪声步骤
+            except Exception as e:
+                _log.warning("profile extract failed session=%s query=%s: %s", sess.session_id, query[:80], e)
+                if turn is not None:
+                    from app.agent.profile_extract import profile_step_title
+
+                    turn.add(
+                        StepType.MEMORY,
+                        profile_step_title(failed=True),
+                        {"error": str(e)},
+                        status="error",
+                    )
+        self.store.save(sess)
+
     def _handle_tools(
         self,
         sess: SessionData,
@@ -575,6 +1022,7 @@ class Orchestrator:
         turn: TurnTrace,
         active_seat: str = "front_left",
     ):
+        self._capture_profile_plan(metrics, route)
         yield from self._emit_text(f"> **[{_ts()}] Agent Loop（逐步规划 · 观察后再决策）...**\n\n---\n\n")
         yield from self._trace(turn, StepType.LOOP, "进入 Agent Loop", {"active_seat": active_seat})
 
@@ -613,7 +1061,10 @@ class Orchestrator:
                 ev = next(gen)
                 if ev.type == "log":
                     yield from self._trace(turn, StepType.LOOP, str(ev.data))
-                    yield from self._emit_text(f"> {ev.data}\n")
+                    log_line = str(ev.data or "")
+                    if looks_like_raw_error(log_line):
+                        log_line = "warn: 本步有异常，已记下，继续用上一帧车况"
+                    yield from self._emit_text(f"> {log_line}\n")
                 elif ev.type == "blocked":
                     msg = (ev.data or {}).get("message") or (ev.data or {}).get("blocked_reason") or "已拦截"
                     sess.transcript.append(MessageRole.ASSISTANT, msg)
@@ -677,8 +1128,9 @@ class Orchestrator:
 
         if loop_result is None:
             yield from self._trace(turn, StepType.ERROR, "工具循环异常结束", status="error")
-            yield from self._commit_turn(sess, turn, metrics, "error", "工具循环异常结束")
-            yield from self._emit_text("工具循环异常结束。")
+            loop_fail = "【听】车上这步没走完。稍后再试一次，不用重置会话。"
+            yield from self._commit_turn(sess, turn, metrics, "error", loop_fail)
+            yield from self._emit_text(loop_fail)
             yield StreamEvent(
                 "final",
                 {"turn_id": turn.turn_id, "cite_pages": [], "related_images": [], "state": self._state_summary(sess)},
@@ -687,6 +1139,7 @@ class Orchestrator:
 
         metrics.llm_calls += loop_result.llm_calls
         metrics.loop_iters = loop_result.iterations
+        metrics.profile_plan = loop_result.profile_update
         if loop_result.route:
             metrics.intent = loop_result.route.intent.value
         if loop_result.call_trace:
@@ -809,7 +1262,8 @@ class Orchestrator:
         # 周边 POI / 消息正文 →「依据」面板；口语另组织
         poi_cards = self._nearby_context_cards(results)
         message_cards = self._message_context_cards(results)
-        evidence_cards = [*poi_cards, *message_cards]
+        web_cards = self._web_search_context_cards(results)
+        evidence_cards = [*poi_cards, *message_cards, *web_cards]
         if poi_cards:
             yield StreamEvent("context", poi_cards)
             yield from self._trace(
@@ -826,13 +1280,21 @@ class Orchestrator:
                 f"读入消息依据 {len(message_cards)} 条",
                 {"doc_count": len(message_cards), "kind": "message"},
             )
+        if web_cards:
+            yield StreamEvent("context", web_cards)
+            yield from self._trace(
+                turn,
+                StepType.TOOL,
+                f"读入网页依据 {len(web_cards)} 条",
+                {"doc_count": len(web_cards), "kind": "web"},
+            )
 
         msg_raw = self._format_tool_results(results)
         detail = "；".join(
             f"{r.message} (`{c.name}` {json.dumps(c.arguments, ensure_ascii=False)})"
             for c, r in pairs
         )
-        msg = self._warm_tool_reply(llm, query, msg_raw, results=results)
+        msg = self._warm_tool_reply(llm, query, msg_raw, results=results, sess=sess)
         metrics.llm_calls += 1
 
         # 工具阶段后的 residual（如同一句里的影讯/闲聊/手册）
@@ -862,6 +1324,11 @@ class Orchestrator:
             except Exception:
                 pass
 
+        tool_names = [c.name for c, _ in pairs]
+        self._sync_unread_nudge_after_notifications(sess, tool_names, results)
+        skip_nudge = self._should_skip_unread_nudge(query, tool_names)
+        msg, nudged = self._apply_unread_visual_nudge(sess, msg, skip=skip_nudge)
+
         sess.transcript.append(MessageRole.ASSISTANT, msg)
         yield from self._trace(turn, StepType.RESPONSE, "工具执行完成", {"answer": msg[:200], "raw": detail or msg_raw})
         yield from self._commit_turn(sess, turn, metrics, "ok", msg)
@@ -881,6 +1348,7 @@ class Orchestrator:
                 "tasks": [{"skill": c.name, "script": c.name, "parameters": c.arguments} for c in calls],
             }
 
+        nudge = self._unread_nudge_payload(sess, nudged)
         yield StreamEvent(
             "final",
             {
@@ -892,6 +1360,7 @@ class Orchestrator:
                 "contexts": evidence_cards,
                 "state": self._state_summary(sess),
                 "metrics": _metrics_dict(metrics),
+                **({"visual_nudge": nudge} if nudge else {}),
             },
         )
 
@@ -907,20 +1376,13 @@ class Orchestrator:
             out.append(result)
         return out
 
-    def _pref_ack(self, delta) -> str:
-        bits = []
-        if getattr(delta, "preferred_seat", None):
-            bits.append(f"以后默认按{SEAT_CN.get(delta.preferred_seat, delta.preferred_seat)}来")
-        for z, t in (getattr(delta, "climate_temps", None) or {}).items():
-            bits.append(f"{SEAT_CN.get(z, z)}温度记成 {float(t):.0f}°C")
-        if not bits:
-            bits.append("偏好已记下来")
-        return "好，" + "，".join(bits) + "。换个话题再说空调，我也会按这个来。"
-
     def _format_tool_results(self, results: List[ToolResult]) -> str:
         parts = []
         for r in results:
-            parts.append(r.message if r.success else f"失败：{r.message}")
+            msg = (r.message or "").strip()
+            if not r.success and looks_like_raw_error(msg):
+                msg = "这步没做成"
+            parts.append(msg if r.success else f"失败：{msg}")
         return "；".join(parts) if parts else "已处理完成。"
 
     @staticmethod
@@ -979,7 +1441,109 @@ class Orchestrator:
             lines.append(line)
         out = "\n".join(lines)
         out = re.sub(r"\n{3,}", "\n\n", out).strip()
+        if out and looks_like_raw_error(out):
+            return DEFAULT_SPOKEN
         return out
+
+    def _current_unread_message_ids(self, sess: SessionData) -> List[str]:
+        st = sess.gateway.snapshot()
+        note = st.get("notifications") or {}
+        msgs = [m for m in (note.get("messages") or []) if isinstance(m, dict)]
+        return sorted(
+            str(m.get("id"))
+            for m in msgs
+            if m.get("id") is not None and not m.get("read")
+        )
+
+    def _query_about_messages(self, query: str) -> bool:
+        q = (query or "").strip()
+        return bool(
+            re.search(r"(消息|通知|未读|短信|微信消息|读一下|念一下|有没有.*消息)", q)
+        )
+
+    def _should_skip_unread_nudge(
+        self, query: str, tool_names: Optional[List[str]] = None
+    ) -> bool:
+        if self._query_about_messages(query):
+            return True
+        for name in tool_names or []:
+            if (name or "").startswith("notifications."):
+                return True
+        return False
+
+    def _mark_unread_nudge_seen(self, sess: SessionData, message_ids: Optional[List[str]] = None) -> None:
+        ids = message_ids if message_ids is not None else self._current_unread_message_ids(sess)
+        if not ids:
+            sess.slots.pop("unread_nudge_ids", None)
+            return
+        nudged = {str(x) for x in (sess.slots.get("unread_nudge_ids") or [])}
+        nudged.update(str(x) for x in ids)
+        sess.slots["unread_nudge_ids"] = sorted(nudged)
+
+    def _apply_unread_visual_nudge(
+        self, sess: SessionData, answer: str, *, skip: bool = False
+    ) -> Tuple[str, bool]:
+        """仅追加【看】未读提醒，不进入语音；同一批未读只提醒一次。"""
+        text = (answer or "").strip()
+        if skip:
+            return text, False
+        unread_ids = self._current_unread_message_ids(sess)
+        if not unread_ids:
+            sess.slots.pop("unread_nudge_ids", None)
+            return text, False
+        nudged = {str(x) for x in (sess.slots.get("unread_nudge_ids") or [])}
+        current = {str(x) for x in unread_ids}
+        if current.issubset(nudged):
+            return text, False
+        if re.search(r"【看】[\s\S]*未读", text):
+            self._mark_unread_nudge_seen(sess, unread_ids)
+            return text, False
+        visual = f"\n【看】您有 {len(unread_ids)} 条未读消息，可在中控屏「消息」查看。"
+        text = text.rstrip() + visual
+        self._mark_unread_nudge_seen(sess, unread_ids)
+        return text, True
+
+    def _emit_unread_visual_suffix(self, streamed: str, final: str):
+        streamed = (streamed or "").rstrip()
+        final = (final or "").rstrip()
+        if not final or final == streamed:
+            return
+        if final.startswith(streamed):
+            suffix = final[len(streamed) :]
+            if suffix:
+                yield from self._emit_text(suffix)
+            return
+        if "\n【看】" in final and "\n【看】" not in streamed:
+            yield from self._emit_text(final[final.index("\n【看】") :])
+
+    def _unread_nudge_payload(self, sess: SessionData, nudged: bool) -> Optional[Dict[str, Any]]:
+        if not nudged:
+            return None
+        unread_ids = self._current_unread_message_ids(sess)
+        if not unread_ids:
+            return None
+        n = len(unread_ids)
+        return {
+            "kind": "unread_messages",
+            "count": n,
+            "text": f"您有 {n} 条未读消息，可在中控屏「消息」查看。",
+        }
+
+    def _sync_unread_nudge_after_notifications(
+        self,
+        sess: SessionData,
+        tool_names: Optional[List[str]],
+        results: Optional[List[ToolResult]],
+    ) -> None:
+        names = tool_names or []
+        if any(n == "notifications.list_messages" for n in names):
+            for r in results or []:
+                if (r.tool or "") == "notifications.list_messages" and r.success:
+                    self._mark_unread_nudge_seen(sess)
+                    return
+        if any(n == "notifications.mark_read" for n in names):
+            if not self._current_unread_message_ids(sess):
+                sess.slots.pop("unread_nudge_ids", None)
 
     def _nearby_wrap_payload(self, query: str, results: List[ToolResult]) -> Optional[str]:
         """周边检索：只给模型店名，不给地址清单（完整条目在依据面板）。"""
@@ -1070,6 +1634,94 @@ class Orchestrator:
                 )
                 if idx >= 8:
                     return cards
+        return cards
+
+    def _web_search_hits(self, results: List[ToolResult]) -> List[Dict[str, Any]]:
+        hits: List[Dict[str, Any]] = []
+        for r in results:
+            if (r.tool or "") != "web.search" or not r.success or not isinstance(r.data, dict):
+                continue
+            for item in r.data.get("results") or []:
+                if isinstance(item, dict) and (item.get("title") or item.get("url")):
+                    hits.append(item)
+        return hits
+
+    def _web_search_wrap_payload(self, query: str, results: List[ToolResult]) -> Optional[str]:
+        hits = self._web_search_hits(results)
+        answers = []
+        for r in results:
+            if (r.tool or "") == "web.search" and r.success and isinstance(r.data, dict):
+                a = str(r.data.get("answer") or "").strip()
+                if a:
+                    answers.append(a)
+        if not hits and not answers:
+            if any((r.tool or "") == "web.search" for r in results):
+                fails = [r for r in results if (r.tool or "") == "web.search" and not r.success]
+                if fails:
+                    return None
+            return None
+        parts: List[str] = [
+            "请用两三句口语概括回答用户，不要念网址，不要编造未出现的数字。"
+        ]
+        if answers:
+            parts.append("检索摘要（数字以这里为准）：\n" + answers[0][:600])
+        if hits:
+            lines = []
+            for i, h in enumerate(hits[:5], 1):
+                title = str(h.get("title") or "").strip()
+                snippet = str(h.get("snippet") or "").strip()
+                src = str(h.get("source") or "").strip()
+                bit = f"{i}. {title}"
+                if snippet:
+                    bit += f"：{snippet[:120]}"
+                if src:
+                    bit += f"（{src}）"
+                lines.append(bit)
+            parts.append("网页来源：\n" + "\n".join(lines))
+        return "\n".join(parts)
+
+    def _web_search_spoken_fallback(self, results: List[ToolResult]) -> str:
+        for r in results:
+            if (r.tool or "") == "web.search" and r.success and isinstance(r.data, dict):
+                a = str(r.data.get("answer") or "").strip()
+                if a:
+                    short = a.replace("\n", " ").strip()
+                    if len(short) > 160:
+                        short = short[:160] + "…"
+                    return f"【听】{short}"
+        hits = self._web_search_hits(results)
+        if not hits:
+            return "【听】网上这会儿没搜到靠谱结果，换个关键词我再帮你查。"
+        titles = [str(h.get("title") or "").strip() for h in hits[:3] if h.get("title")]
+        if not titles:
+            return "【听】搜到一些网页，依据面板里可以点开看。"
+        if len(titles) == 1:
+            return f"【听】网上看到的是：{titles[0]}。详情在依据里。"
+        return f"【听】网上主要提到{titles[0]}，另外还有{titles[1]}。详情可以看依据。"
+
+    def _web_search_context_cards(self, results: List[ToolResult]) -> List[Dict[str, Any]]:
+        cards: List[Dict[str, Any]] = []
+        for i, h in enumerate(self._web_search_hits(results)[:8], 1):
+            title = str(h.get("title") or f"网页 {i}").strip()
+            url = str(h.get("url") or "").strip()
+            snippet = str(h.get("snippet") or "").strip()
+            src = str(h.get("source") or "").strip()
+            content_bits = [p for p in (snippet, url) if p]
+            content = "\n".join(content_bits) or title
+            preview = snippet or url
+            if len(preview) > 140:
+                preview = preview[:140] + "…"
+            cards.append(
+                {
+                    "index": i,
+                    "title": title,
+                    "page": src or None,
+                    "content": content,
+                    "preview": preview,
+                    "kind": "web",
+                    "url": url or None,
+                }
+            )
         return cards
 
     _MSG_URGENT_RE = re.compile(
@@ -1242,14 +1894,34 @@ class Orchestrator:
             )
         return None
 
+    def _consume_override_note(self, sess: SessionData) -> str:
+        note = str(sess.slots.pop("_pending_override_note", "") or "").strip()
+        return note
+
+    def _with_continuity_prefix(self, sess: SessionData, msg: str) -> str:
+        note = self._consume_override_note(sess)
+        text = (msg or "").strip()
+        if not note:
+            return text
+        if text.startswith("【听】"):
+            return f"【听】{note}{text[3:].lstrip('，, ')}"
+        return f"【听】{note}{text}"
+
     def _warm_tool_reply(
         self,
         llm: LLMClient,
         query: str,
         tool_msg: str,
         results: Optional[List[ToolResult]] = None,
+        sess: Optional[SessionData] = None,
     ) -> str:
         """把工具结果转成温暖口语；对话框只留口语，绝不回吐工具原文/名单。"""
+        def _finish(text: str) -> str:
+            oral = self._strip_oral_reply(text)
+            if sess is not None:
+                return self._with_continuity_prefix(sess, oral)
+            return oral
+
         if results:
             map_fail = [
                 r
@@ -1257,12 +1929,15 @@ class Orchestrator:
                 if (r.tool or "").startswith("maps.") and not r.success
             ]
             if map_fail:
-                return self._strip_oral_reply(
-                    "；".join(r.message for r in map_fail) or "地图这会儿连不上。"
-                )
+                clean = []
+                for r in map_fail:
+                    m = (r.message or "").strip()
+                    if m and not looks_like_raw_error(m):
+                        clean.append(m)
+                return _finish("；".join(clean) or "地图这会儿连不上。")
             spoken = self._messages_spoken_summary(results)
             if spoken:
-                return self._strip_oral_reply(spoken)
+                return _finish(spoken)
             nearby = self._nearby_wrap_payload(query, results)
             if nearby:
                 try:
@@ -1270,30 +1945,60 @@ class Orchestrator:
                         TOOL_WRAP_STYLE,
                         f"用户原话：{query}\n可供口述的材料（禁止照抄成名单）：\n{nearby}",
                         temperature=0.35,
+                        retries=1,
                     )
                     text = self._strip_oral_reply((text or "").strip())
                     if text and "【听】" not in text:
                         text = f"【听】{text}"
-                    return text or self._nearby_spoken_fallback(query, results)
+                    return _finish(text or self._nearby_spoken_fallback(query, results))
                 except Exception:
-                    return self._nearby_spoken_fallback(query, results)
+                    return _finish(self._nearby_spoken_fallback(query, results))
+            web = self._web_search_wrap_payload(query, results)
+            if web:
+                try:
+                    text = llm.chat(
+                        TOOL_WRAP_STYLE,
+                        f"用户原话：{query}\n可供口述的材料（禁止念网址、禁止编造）：\n{web}",
+                        temperature=0.35,
+                        retries=1,
+                    )
+                    text = self._strip_oral_reply((text or "").strip())
+                    if text and "【听】" not in text:
+                        text = f"【听】{text}"
+                    return _finish(text or self._web_search_spoken_fallback(results))
+                except Exception:
+                    return _finish(self._web_search_spoken_fallback(results))
             clarify_spoken = self._nav_clarify_spoken(results)
             if clarify_spoken:
-                return self._strip_oral_reply(f"【听】{clarify_spoken}")
+                return _finish(f"【听】{clarify_spoken}")
             if all(not r.success for r in results):
-                return self._strip_oral_reply(tool_msg)
+                # 失败也给连续人话，避免用户以为会话坏了
+                detail = "；".join(
+                    (r.message or "").strip()
+                    for r in results
+                    if (r.message or "").strip() and not looks_like_raw_error(r.message or "")
+                )
+                if detail:
+                    return _finish(
+                        sanitize_spoken(
+                            f"【听】这步没做成：{detail[:160]}。你可以换个说法再试，不用重置会话。"
+                        )
+                    )
+                return _finish("【听】这步没做成，换个说法再试就行，不用重置会话。")
         try:
             text = llm.chat(
                 TOOL_WRAP_STYLE,
                 f"用户原话：{query}\n工具结果摘要（禁止照抄后台原文，禁止 markdown）：\n{tool_msg}",
                 temperature=0.35,
+                retries=1,
             )
             text = self._strip_oral_reply((text or "").strip())
             if text and "【听】" not in text:
                 text = f"【听】{text}"
-            return text or "【听】好，我这边处理好了。"
-        except Exception:
-            return "【听】好，我这边处理好了。"
+            return _finish(text or "【听】好，我这边处理好了。")
+        except Exception as e:
+            info = classify_llm_error(e, mode=getattr(llm, "mode", "remote"))
+            return _finish(compose_llm_fail_reply(info, fact="【听】车上这步已经处理好了。"))
 
     def _handle_search(
         self,
@@ -1315,6 +2020,7 @@ class Orchestrator:
             format_lights_status,
             format_nav_status,
             slim_vehicle_for_query,
+            spoken_vehicle_status,
             strip_vehicle_snapshot_block,
         )
 
@@ -1371,6 +2077,7 @@ class Orchestrator:
             + f"\n\n当前座位: {seat}\n用户问: {query}"
         )
         full: List[str] = []
+        llm_failed = False
         try:
             for token in llm.chat_stream(system, user, temperature=0.45):
                 full.append(token)
@@ -1378,57 +2085,104 @@ class Orchestrator:
             metrics.llm_calls += 1
             ans = "".join(full).strip() or "这一块我暂时没读到，你再问具体一点我帮你看。"
         except Exception as e:
+            llm_failed = True
+            info = classify_llm_error(e, mode=getattr(llm, "mode", "remote"))
+            yield from self._trace(turn, StepType.ERROR, "状态口语生成失败", info, status="error")
             if full:
                 ans = "".join(full).strip()
             else:
-                ans = f"状态我这边刚看岔了：{e}。你稍后再试一次好不好？"
+                fact = spoken_vehicle_status(state, query, seat)
+                ans = compose_llm_fail_reply(info, fact=fact)
                 yield from self._emit_text(ans)
+        raw_ans = ans
+        skip_nudge = llm_failed or self._should_skip_unread_nudge(query, metrics.tools)
+        ans, nudged = self._apply_unread_visual_nudge(sess, ans, skip=skip_nudge)
+        if nudged:
+            yield from self._emit_unread_visual_suffix(raw_ans, ans)
         sess.transcript.append(MessageRole.ASSISTANT, ans)
         yield from self._trace(turn, StepType.RESPONSE, "状态回答", {"answer": ans[:200]})
-        yield from self._commit_turn(sess, turn, metrics, "ok", ans)
+        yield from self._commit_turn(sess, turn, metrics, "warn" if llm_failed else "ok", ans)
+        nudge = self._unread_nudge_payload(sess, nudged)
         yield StreamEvent(
             "final",
-            {"turn_id": turn.turn_id, "cite_pages": [], "related_images": [], "state": self._state_summary(sess)},
+            {
+                "turn_id": turn.turn_id,
+                "cite_pages": [],
+                "related_images": [],
+                "state": self._state_summary(sess),
+                **({"visual_nudge": nudge} if nudge else {}),
+            },
         )
 
     def _handle_knowledge(
         self, sess: SessionData, query: str, llm: LLMClient, metrics: TurnMetrics, turn: TurnTrace
     ):
         yield StreamEvent("status", "检索手册知识库...")
-        yield from self._trace(turn, StepType.KNOWLEDGE, "检索手册")
         yield from self._emit_text(f"> **[{_ts()}] 知识查询，检索中...**\n>\n")
         rag = self._get_rag()
+        docs = []
+        retrieve_error = ""
+        context_str, context_cards = "", []
         try:
-            docs = rag.retrieve(query)
+            docs = rag.retrieve(query) or []
+            if docs:
+                context_str, context_cards = rag.build_context_cards(docs)
         except Exception as e:
-            msg = f"知识库暂时不可用：{e}"
-            sess.transcript.append(MessageRole.ASSISTANT, msg)
-            yield from self._commit_turn(sess, turn, metrics, "error", msg)
-            yield from self._emit_text(msg)
-            yield StreamEvent(
-                "final",
-                {"turn_id": turn.turn_id, "cite_pages": [], "related_images": [], "state": self._state_summary(sess)},
+            retrieve_error = str(e) or e.__class__.__name__
+            yield from self._trace(
+                turn,
+                StepType.KNOWLEDGE,
+                "检索手册失败",
+                {"error": retrieve_error, "doc_count": 0, "docs": []},
+                status="error",
             )
-            return
-        if not docs:
-            msg = KNOWLEDGE_EMPTY
-            sess.transcript.append(MessageRole.ASSISTANT, msg)
-            yield from self._commit_turn(sess, turn, metrics, "ok", msg)
-            yield from self._emit_text(msg)
+        else:
+            yield from self._trace(
+                turn,
+                StepType.KNOWLEDGE,
+                f"命中 {len(docs)} 篇文档" if docs else "未命中文档",
+                {"doc_count": len(docs), "docs": context_cards},
+                status="ok" if docs else "warn",
+            )
+
+        if retrieve_error or not docs:
+            answer = (
+                "【听】手册知识库这会儿连不上，我没法对照原文答。稍后再问一遍就行。"
+                if retrieve_error
+                else KNOWLEDGE_EMPTY
+            )
+            sess.transcript.append(MessageRole.ASSISTANT, answer)
+            yield from self._trace(
+                turn,
+                StepType.RESPONSE,
+                "知识回答",
+                {
+                    "answer": answer,
+                    "reason": "rag_unavailable" if retrieve_error else "no_docs",
+                },
+            )
+            yield from self._emit_text(answer)
+            yield from self._commit_turn(
+                sess, turn, metrics, "error" if retrieve_error else "ok", answer
+            )
             yield StreamEvent(
                 "final",
-                {"turn_id": turn.turn_id, "cite_pages": [], "related_images": [], "state": self._state_summary(sess)},
+                {
+                    "turn_id": turn.turn_id,
+                    "cite_pages": [],
+                    "related_images": [],
+                    "state": self._state_summary(sess),
+                },
             )
             return
 
         yield from self._emit_text(f"> **[{_ts()}] 检索到{len(docs)}篇文档，生成回答中...**\n\n---\n\n")
-        yield from self._trace(turn, StepType.KNOWLEDGE, f"命中 {len(docs)} 篇文档", {"doc_count": len(docs)})
-        context_str, context_cards = rag.build_context_cards(docs)
         yield StreamEvent("context", context_cards)
-        system = KNOWLEDGE_STYLE
+        system = KNOWLEDGE_STYLE + sess.memory.build_style_overlay()
         user = (
             f"用户问题: {query}\n\n参考文档:\n{context_str}\n\n"
-            "请严格按系统要求的结构作答：先结论，再编号步骤，必要时一小提示。"
+            "请严格按系统要求的结构作答：先结论，再编号步骤，必要时用纯文字写「小提示：」。"
+            "禁止 emoji、表情符号和装饰图标。"
             "只在真正引用到某篇参考文档的句子/步骤末尾标【n】；没有引用的句子不要标来源；"
             "最后「参考：」行只列实际用到的编号，未引用则不写该行。"
         )
@@ -1439,15 +2193,33 @@ class Orchestrator:
                 yield StreamEvent("token", token)
             metrics.llm_calls += 1
             answer = "".join(full)
-        except Exception:
-            answer = llm.chat(system, user, temperature=0.35)
-            metrics.llm_calls += 1
-            yield from self._emit_text(answer)
+        except Exception as e:
+            info = classify_llm_error(e, mode=getattr(llm, "mode", "remote"))
+            yield from self._trace(turn, StepType.ERROR, "知识流式生成失败", info, status="error")
+            try:
+                answer = llm.chat(system, user, temperature=0.35, retries=1)
+                metrics.llm_calls += 1
+                yield from self._emit_text(answer)
+            except Exception as e2:
+                info2 = classify_llm_error(e2, mode=getattr(llm, "mode", "remote"))
+                yield from self._trace(turn, StepType.ERROR, "知识回答生成失败", info2, status="error")
+                answer = compose_llm_fail_reply(
+                    info2,
+                    fact="【听】手册检索已经有结果了，但这句没法生成。",
+                )
+                yield from self._emit_text(answer)
+
+        raw_answer = answer
+        skip_nudge = self._should_skip_unread_nudge(query, metrics.tools)
+        answer, nudged = self._apply_unread_visual_nudge(sess, answer, skip=skip_nudge)
+        if nudged:
+            yield from self._emit_unread_visual_suffix(raw_answer, answer)
 
         sess.transcript.append(MessageRole.ASSISTANT, answer)
         post = rag.post_process(answer, docs)
         yield from self._trace(turn, StepType.RESPONSE, "知识回答", {"answer": answer[:200]})
         yield from self._commit_turn(sess, turn, metrics, "ok", answer)
+        nudge = self._unread_nudge_payload(sess, nudged)
         yield StreamEvent(
             "final",
             {
@@ -1457,6 +2229,7 @@ class Orchestrator:
                 "contexts": context_cards,
                 "state": self._state_summary(sess),
                 "metrics": _metrics_dict(metrics),
+                **({"visual_nudge": nudge} if nudge else {}),
             },
         )
 
@@ -1475,6 +2248,17 @@ class Orchestrator:
             )
             return
 
+        web = try_web_search_utterance(query)
+        if web is not None:
+            memory_hint = self.store.assembler.memory_hint(bundle, sess.transcript)
+            metrics.intent = web.intent.value
+            metrics.tools = [c.name for c in web.tool_calls]
+            yield from self._trace(turn, StepType.INTENT, "闲聊升级为网页检索", {"fast_path": "web_from_chat"})
+            yield from self._handle_tools(
+                sess, query, web, llm, memory_hint, metrics, turn, active_seat="front_left"
+            )
+            return
+
         yield StreamEvent("status", "思考中...")
         yield from self._trace(turn, StepType.CHAT, "闲聊路径")
         yield from self._emit_text(f"> **[{_ts()}] 闲聊（带上下文）...**\n\n---\n\n")
@@ -1483,14 +2267,16 @@ class Orchestrator:
         st = sess.gateway.snapshot()
         nav = st.get("navigation") or {}
         pos = nav.get("position") or {}
-        conn = st.get("connectivity") or {}
         note = st.get("notifications") or {}
-        wifi = conn.get("wifi") or {}
-        cell = conn.get("cellular") or {}
         msgs = [m for m in (note.get("messages") or []) if isinstance(m, dict)]
         unread_n = sum(1 for m in msgs if not m.get("read"))
+        q_ask = (query or "").strip()
+        about_loc = bool(
+            re.search(r"(在哪|哪里|位置|定位|导航|目的地|还要多久|多远)", q_ask)
+        )
+        about_msg = bool(re.search(r"(消息|通知|未读|短信|微信消息|读一下|念一下)", q_ask))
         loc_hint = ""
-        if pos.get("lng") is not None and pos.get("lat") is not None:
+        if about_loc and pos.get("lng") is not None and pos.get("lat") is not None:
             place = pos.get("name") or "行驶中"
             if nav.get("navigating"):
                 remain = nav.get("remaining_m")
@@ -1502,42 +2288,108 @@ class Orchestrator:
                 dest = nav.get("destination") or "目的地"
                 loc_hint = (
                     f"\n当前车辆定位：{place}；导航已开启，前往 {dest}{remain_s}。"
-                    "用户问位置时可顺带提剩余里程；若问附近地点，建议直接问「附近有什么美食/充电站」。"
+                    "只回答与位置/导航相关的问题；勿提未读消息或其它子系统。"
                 )
             else:
                 loc_hint = (
                     f"\n当前车辆定位：{place}；导航未开启（navigating=false）。"
-                    "用户问「在哪里」时只报当前位置路名，禁止说剩余公里、ETA、路况、目的地，"
-                    "也禁止说「正往某某开/导航显示…」；后台道路巡航不是导航。"
-                    "若问起附近地点，应建议他直接问「附近有什么美食/充电站」，你会调用地图能力。"
+                    "用户问「在哪里」时只报当前位置路名，禁止说剩余公里、ETA、目的地。"
+                    "勿提未读消息或其它子系统。"
                 )
-        sys_hint = (
-            f"\n车机连接与通知（已同步）：Wi‑Fi={'开·'+str(wifi.get('ssid') or '热点') if wifi.get('on') else '关'}；"
-            f"蜂窝={cell.get('carrier') or ''}{cell.get('type') or ''}；"
-            f"未读消息 {unread_n} 条；"
-            f"电话={note.get('phone_status') or '空闲'}。"
-            "消息无需授权：仪表盘可直接点开查看。"
-            "用户要你读消息时，调用 notifications.list_messages（会先隐私确认）；"
-            "确认后口头只摘要未读与紧急项，完整正文在依据面板；不要编造正文。"
-        )
-        system = CHAT_STYLE + "\n\n" + bundle.user_context + loc_hint + sys_hint
-        user = f"最近对话:\n{bundle.recent_dialog}\n\n用户: {query}"
+        sys_hint = ""
+        if about_msg:
+            sys_hint = (
+                f"\n车机通知：未读消息 {unread_n} 条；电话={note.get('phone_status') or '空闲'}。"
+                "用户要读消息时，调用 notifications.list_messages（会先隐私确认）；"
+                "确认后口头只摘要未读与紧急项，完整正文在依据面板；不要编造正文。"
+            )
+        else:
+            # 默认不把未读/Wi‑Fi塞进闲聊上下文，避免模型主动加戏
+            sys_hint = (
+                "\n约束：本轮未问消息/连接时，禁止主动提及未读消息、Wi‑Fi、电话状态。"
+            )
+        pref = sess.memory.format_preferences_block()
+        style_overlay = sess.memory.build_style_overlay()
+        system = CHAT_STYLE + style_overlay + "\n\n" + pref + loc_hint + sys_hint
+        recent = bundle.recent_dialog or ""
+        if len(recent) > 1200:
+            recent = recent[-1200:]
+        search_block = ""
+        web_q = chat_web_query(query, recent)
+        if web_q:
+            yield StreamEvent("status", "网上查一下...")
+            call = ToolCall(name="web.search", arguments={"query": web_q, "count": 5}, reason="闲聊联网")
+            result = self.registry.execute(sess.gateway, call)
+            metrics.tools = ["web.search"]
+            yield from self._trace(
+                turn,
+                StepType.TOOL,
+                "闲聊调用网页搜索",
+                {"query": web_q, "success": result.success, "provider": (result.data or {}).get("provider")},
+            )
+            web_cards = self._web_search_context_cards([result])
+            if web_cards:
+                yield StreamEvent("context", web_cards)
+                yield from self._trace(
+                    turn,
+                    StepType.TOOL,
+                    f"读入网页依据 {len(web_cards)} 条",
+                    {"doc_count": len(web_cards), "kind": "web"},
+                )
+            wrap = self._web_search_wrap_payload(query, [result])
+            search_block = wrap or (result.message or "")
+            ans = str((result.data or {}).get("answer") or "").strip()
+            if ans and "检索摘要" not in search_block:
+                search_block = f"检索摘要：{ans[:500]}\n" + (search_block or "")
+            yield from self._emit_text(f"> [web.search] {web_q}\n\n")
+        user = f"最近对话:\n{recent}\n\n用户: {query}"
+        if search_block:
+            user = (
+                f"最近对话:\n{recent}\n\n"
+                f"网上检索材料（供闲聊引用，禁止编造材料外事实）：\n{search_block}\n\n"
+                f"用户: {query}"
+            )
+        llm_failed = False
         try:
             full = []
-            for token in llm.chat_stream(system, user, temperature=0.8):
+            for token in llm.chat_stream(system, user, temperature=0.45):
                 full.append(token)
                 yield StreamEvent("token", token)
             metrics.llm_calls += 1
             answer = "".join(full)
-        except Exception:
-            answer = CHAT_FALLBACK
+        except Exception as e:
+            llm_failed = True
+            info = classify_llm_error(e, mode=getattr(llm, "mode", "remote"))
+            yield from self._trace(turn, StepType.ERROR, "闲聊生成失败", info, status="error")
+            fact = ""
+            if about_loc:
+                place = str(pos.get("name") or "").strip()
+                if place and nav.get("navigating"):
+                    dest = str(nav.get("destination") or "目的地").strip() or "目的地"
+                    fact = f"【听】你现在在{place}，正往{dest}开。"
+                elif place:
+                    fact = f"【听】你现在在{place}。"
+            answer = compose_llm_fail_reply(info, fact=fact)
             yield from self._emit_text(answer)
+        raw_answer = answer
+        skip_nudge = about_msg or llm_failed
+        answer, nudged = self._apply_unread_visual_nudge(sess, answer, skip=skip_nudge)
+        if nudged:
+            yield from self._emit_unread_visual_suffix(raw_answer, answer)
         sess.transcript.append(MessageRole.ASSISTANT, answer)
         yield from self._trace(turn, StepType.RESPONSE, "闲聊回答", {"answer": answer[:200]})
-        yield from self._commit_turn(sess, turn, metrics, "ok", answer)
+        yield from self._persist_turn(sess, llm, query, metrics, turn)
+        yield from self._commit_turn(sess, turn, metrics, "warn" if llm_failed else "ok", answer)
+        nudge = self._unread_nudge_payload(sess, nudged)
         yield StreamEvent(
             "final",
-            {"turn_id": turn.turn_id, "cite_pages": [], "related_images": [], "state": self._state_summary(sess)},
+            {
+                "turn_id": turn.turn_id,
+                "cite_pages": [],
+                "related_images": [],
+                "state": self._state_summary(sess),
+                **({"visual_nudge": nudge} if nudge else {}),
+            },
         )
 
     def _state_summary(self, sess: SessionData) -> Dict[str, Any]:
@@ -1547,6 +2399,12 @@ class Orchestrator:
         zone = (climate.get("zones") or {}).get(seat) or (climate.get("zones") or {}).get("front_left") or {}
         media = st.get("media", {})
         prefs = sess.memory.load_preferences()
+        persona = sess.memory.load_persona()
+        memories = sess.memory.load_memories()
+        mem_count = len((memories.get("items") or []))
+        unread_n = len(self._current_unread_message_ids(sess))
+        from app.agent.user_profile import md_preview
+
         return {
             "climate_power": climate.get("power"),
             "temp": zone.get("temp"),
@@ -1554,9 +2412,15 @@ class Orchestrator:
             "active_seat": seat,
             "active_seat_cn": SEAT_CN.get(seat, seat),
             "preferences": {
+                "text": md_preview(prefs.get("text") or ""),
                 "preferred_seat": prefs.get("preferred_seat"),
                 "climate_temp_c": prefs.get("climate_temp_c"),
+                "climate_apply_all": prefs.get("climate_apply_all"),
             },
+            "persona": {"text": md_preview(persona.get("text") or "")},
+            "memories_preview": md_preview(memories.get("text") or ""),
+            "memory_count": mem_count,
+            "unread_messages": unread_n,
             "volume": media.get("volume"),
             "music": media.get("music"),
             "navigation": st.get("navigation"),
@@ -1569,8 +2433,13 @@ class Orchestrator:
         }
 
     def _emit_text(self, text: str):
-        if text:
-            yield StreamEvent("token", text)
+        if not text:
+            return
+        # 过程面板用 > 开头；口语一旦夹带堆栈/接口原文，整段换成兜底
+        head = text.lstrip()
+        if head and not head.startswith(">") and looks_like_raw_error(text):
+            text = DEFAULT_SPOKEN
+        yield StreamEvent("token", text)
 
 
 _ORCH: Optional[Orchestrator] = None

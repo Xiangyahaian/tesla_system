@@ -1,0 +1,264 @@
+{
+  "timestamp": "20260828_171257",
+  "protocol": {
+    "task": "reranker ablation: official bge-reranker-v2-m3 vs fine-tuned checkpoint",
+    "device": "cuda",
+    "precision": "fp16",
+    "max_length": 512,
+    "batch_size": 16,
+    "rag_set": {
+      "path": "/home/xiangyahaian/tesla_system/data/qa_pairs/test_qa_pair_pred.json",
+      "n": 649,
+      "avg_candidates": 9.21,
+      "candidate_source": "同一批融合召回后的候选块（来自 test_qa_pair_pred.json 的 context）",
+      "labeling": "金标答案 vs 候选块的 4-gram recall 作为支撑判定"
+    },
+    "listwise_set": {
+      "path": "/home/xiangyahaian/tesla_system/data/rerank_data/test.json",
+      "n": 458,
+      "labeling": "约定 content[0] 最相关；偏训练分布，负例较易"
+    },
+    "models": {
+      "base": "/home/xiangyahaian/tesla_system/models/BAAI/bge-reranker-v2-m3",
+      "tuned": "/home/xiangyahaian/tesla_system/RAG-Retrieval/rag_retrieval/train/reranker/output/bert/runs/checkpoints/checkpoint_0"
+    }
+  },
+  "file_order": {
+    "rag": {
+      "n": 649,
+      "elapsed_sec": 0.0,
+      "definitions": {
+        "support_doc": "与金标答案 4-gram recall 最高的候选块",
+        "hit@k": "支撑块排在前 k",
+        "p@1": "精排第1块 4-gram recall >= 0.2",
+        "mrr": "支撑块名次倒数均值",
+        "ndcg@k": "按 4-gram 覆盖率分级相关度(3/2/1/0)计算",
+        "evidence_recall": "候选中是否存在 4-gram recall>=0.5 的块（与重排无关，同候选集应一致）"
+      },
+      "hit@1": 0.7411,
+      "hit@1_pct": 74.11,
+      "hit@1_count": 481,
+      "hit@1_ci95": [
+        0.7061,
+        0.7734
+      ],
+      "hit@1_ci95_pct": [
+        70.61,
+        77.34
+      ],
+      "hit@3": 0.886,
+      "hit@3_pct": 88.6,
+      "hit@3_count": 575,
+      "hit@3_ci95": [
+        0.8592,
+        0.9082
+      ],
+      "hit@5": 0.9337,
+      "hit@5_pct": 93.37,
+      "hit@5_count": 606,
+      "hit@5_ci95": [
+        0.9119,
+        0.9504
+      ],
+      "p@1": 0.7966,
+      "p@1_pct": 79.66,
+      "p@1_count": 517,
+      "p@1_ci95": [
+        0.7639,
+        0.8258
+      ],
+      "mrr": 0.8186,
+      "ndcg@5": 0.8397,
+      "ndcg@10": 0.8725,
+      "evidence_recall": 0.8629,
+      "evidence_recall_pct": 86.29,
+      "evidence_recall_count": 560
+    }
+  },
+  "base": {
+    "path": "/home/xiangyahaian/tesla_system/models/BAAI/bge-reranker-v2-m3",
+    "rag": {
+      "n": 649,
+      "elapsed_sec": 49.7,
+      "definitions": {
+        "support_doc": "与金标答案 4-gram recall 最高的候选块",
+        "hit@k": "支撑块排在前 k",
+        "p@1": "精排第1块 4-gram recall >= 0.2",
+        "mrr": "支撑块名次倒数均值",
+        "ndcg@k": "按 4-gram 覆盖率分级相关度(3/2/1/0)计算",
+        "evidence_recall": "候选中是否存在 4-gram recall>=0.5 的块（与重排无关，同候选集应一致）"
+      },
+      "hit@1": 0.7889,
+      "hit@1_pct": 78.89,
+      "hit@1_count": 512,
+      "hit@1_ci95": [
+        0.7559,
+        0.8186
+      ],
+      "hit@1_ci95_pct": [
+        75.59,
+        81.86
+      ],
+      "hit@3": 0.9353,
+      "hit@3_pct": 93.53,
+      "hit@3_count": 607,
+      "hit@3_ci95": [
+        0.9137,
+        0.9518
+      ],
+      "hit@5": 0.9615,
+      "hit@5_pct": 96.15,
+      "hit@5_count": 624,
+      "hit@5_ci95": [
+        0.9438,
+        0.9738
+      ],
+      "p@1": 0.8598,
+      "p@1_pct": 85.98,
+      "p@1_count": 558,
+      "p@1_ci95": [
+        0.8309,
+        0.8844
+      ],
+      "mrr": 0.8652,
+      "ndcg@5": 0.9159,
+      "ndcg@10": 0.9326,
+      "evidence_recall": 0.8629,
+      "evidence_recall_pct": 86.29,
+      "evidence_recall_count": 560
+    },
+    "listwise": {
+      "n": 458,
+      "elapsed_sec": 10.9,
+      "definitions": {
+        "label": "约定 content[0] 最相关，其后递减；负例多为易区分样本",
+        "hit@1": "得分最高文档是否为 content[0]",
+        "pairwise_acc": "得分是否严格按 content 顺序非增",
+        "ndcg@3": "按约定相关度分级计算"
+      },
+      "hit@1": 0.9585,
+      "hit@1_pct": 95.85,
+      "hit@1_count": 439,
+      "hit@1_ci95": [
+        0.9361,
+        0.9733
+      ],
+      "hit@1_ci95_pct": [
+        93.61,
+        97.33
+      ],
+      "pairwise_acc": 0.8428,
+      "pairwise_acc_pct": 84.28,
+      "ndcg@3": 0.9869
+    }
+  },
+  "tuned": {
+    "path": "/home/xiangyahaian/tesla_system/RAG-Retrieval/rag_retrieval/train/reranker/output/bert/runs/checkpoints/checkpoint_0",
+    "rag": {
+      "n": 649,
+      "elapsed_sec": 48.3,
+      "definitions": {
+        "support_doc": "与金标答案 4-gram recall 最高的候选块",
+        "hit@k": "支撑块排在前 k",
+        "p@1": "精排第1块 4-gram recall >= 0.2",
+        "mrr": "支撑块名次倒数均值",
+        "ndcg@k": "按 4-gram 覆盖率分级相关度(3/2/1/0)计算",
+        "evidence_recall": "候选中是否存在 4-gram recall>=0.5 的块（与重排无关，同候选集应一致）"
+      },
+      "hit@1": 0.792,
+      "hit@1_pct": 79.2,
+      "hit@1_count": 514,
+      "hit@1_ci95": [
+        0.7591,
+        0.8215
+      ],
+      "hit@1_ci95_pct": [
+        75.91,
+        82.15
+      ],
+      "hit@3": 0.9137,
+      "hit@3_pct": 91.37,
+      "hit@3_count": 593,
+      "hit@3_ci95": [
+        0.8896,
+        0.933
+      ],
+      "hit@5": 0.9569,
+      "hit@5_pct": 95.69,
+      "hit@5_count": 621,
+      "hit@5_ci95": [
+        0.9384,
+        0.97
+      ],
+      "p@1": 0.8629,
+      "p@1_pct": 86.29,
+      "p@1_count": 560,
+      "p@1_ci95": [
+        0.8343,
+        0.8872
+      ],
+      "mrr": 0.8615,
+      "ndcg@5": 0.9125,
+      "ndcg@10": 0.9307,
+      "evidence_recall": 0.8629,
+      "evidence_recall_pct": 86.29,
+      "evidence_recall_count": 560
+    },
+    "listwise": {
+      "n": 458,
+      "elapsed_sec": 10.9,
+      "definitions": {
+        "label": "约定 content[0] 最相关，其后递减；负例多为易区分样本",
+        "hit@1": "得分最高文档是否为 content[0]",
+        "pairwise_acc": "得分是否严格按 content 顺序非增",
+        "ndcg@3": "按约定相关度分级计算"
+      },
+      "hit@1": 0.9716,
+      "hit@1_pct": 97.16,
+      "hit@1_count": 445,
+      "hit@1_ci95": [
+        0.952,
+        0.9833
+      ],
+      "hit@1_ci95_pct": [
+        95.2,
+        98.33
+      ],
+      "pairwise_acc": 0.8646,
+      "pairwise_acc_pct": 86.46,
+      "ndcg@3": 0.9901
+    }
+  },
+  "delta_tuned_minus_base": {
+    "rag": {
+      "hit@1": 0.0031,
+      "hit@1_pp": 0.31,
+      "hit@3": -0.0216,
+      "hit@3_pp": -2.16,
+      "hit@5": -0.0046,
+      "hit@5_pp": -0.46,
+      "p@1": 0.0031,
+      "p@1_pp": 0.31,
+      "mrr": -0.0037,
+      "mrr_pp": -0.37,
+      "ndcg@5": -0.0034,
+      "ndcg@5_pp": -0.34,
+      "ndcg@10": -0.0019,
+      "ndcg@10_pp": -0.19,
+      "hit@1_pct": 0.31,
+      "hit@3_pct": -2.16,
+      "hit@5_pct": -0.46,
+      "p@1_pct": 0.31
+    },
+    "listwise": {
+      "hit@1": 0.0131,
+      "hit@1_pp": 1.31,
+      "pairwise_acc": 0.0218,
+      "pairwise_acc_pp": 2.18,
+      "ndcg@3": 0.0032,
+      "ndcg@3_pp": 0.32,
+      "hit@1_pct": 1.31,
+      "pairwise_acc_pct": 2.18
+    }
+  }
+}

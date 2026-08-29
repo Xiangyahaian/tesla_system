@@ -24,6 +24,7 @@ export type ChatMessage = {
     content: string;
     preview?: string;
     kind?: string;
+    images?: { image_path: string; title?: string }[];
   }[];
 };
 

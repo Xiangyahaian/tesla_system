@@ -1,0 +1,67 @@
+{
+  "meta": {
+    "title": "综合压测 50 条",
+    "user_nickname": "压测专用"
+  },
+  "cases": [
+    {"id": "P-C01", "cat": "persona", "q": "希望你专业严谨，少说套话，别卖萌", "expect": {"persona_updated": true}},
+    {"id": "P-C02", "cat": "persona", "q": "温柔陪伴一点，语气柔和", "expect": {"persona_updated": true, "tone": "gentle"}},
+    {"id": "P-C03", "cat": "persona", "q": "回复尽量简洁干练，一两句说完", "expect": {"persona_updated": true, "tone": "concise"}},
+    {"id": "P-C04", "cat": "persona", "q": "轻松活泼可以适度俏皮，但别油腻", "expect": {"persona_updated": true}},
+    {"id": "P-C05", "cat": "persona", "q": "别用emoji，也别用过多感叹号", "expect": {"persona_updated": true}},
+    {"id": "P-C06", "cat": "persona", "q": "从专业改回温柔一点说话", "expect": {"persona_updated": true, "tone": "gentle"}},
+
+    {"id": "M-C01", "cat": "memory", "q": "我家住在望京西园三区", "expect": {"memories_updated": true, "memory_contains": "望京"}},
+    {"id": "M-C02", "cat": "memory", "q": "我女儿叫小雨，今年八岁", "expect": {"memories_updated": true, "memory_contains": "小雨"}},
+    {"id": "M-C03", "cat": "memory", "q": "我在中关村软件园二期上班", "expect": {"memories_updated": true, "memory_contains": "中关村"}},
+    {"id": "M-C04", "cat": "memory", "q": "我老婆叫小美，养了一只猫叫咪咪", "expect": {"memories_updated": true}},
+    {"id": "M-C05", "cat": "memory", "q": "我搬家了，现在住在国贸商城附近", "expect": {"memories_updated": true, "memory_contains": "国贸"}},
+    {"id": "M-C06", "cat": "memory", "q": "公司换到望京了，不在中关村了", "expect": {"memories_updated": true, "memory_contains": "望京"}},
+
+    {"id": "F-C01", "cat": "preferences", "q": "以后叫我老板", "expect": {"preferences_updated": true}},
+    {"id": "F-C02", "cat": "preferences", "q": "以后我坐副驾，空调默认22度", "expect": {"preferences_updated": true, "preferred_seat": "front_right", "temp": 22}},
+    {"id": "F-C03", "cat": "preferences", "q": "以后空调全开21度", "expect": {"preferences_updated": true, "temp": 21}},
+    {"id": "F-C04", "cat": "preferences", "q": "我平时喜欢听民谣和轻音乐", "expect": {"preferences_updated": true}},
+    {"id": "F-C05", "cat": "preferences", "q": "习惯坐主驾，温度24度", "expect": {"preferences_updated": true, "preferred_seat": "front_left", "temp": 24}},
+    {"id": "F-C06", "cat": "preferences", "q": "我想改名叫赵赵，以后就这么叫我", "expect": {"preferences_updated": true, "display_contains": "赵赵"}},
+
+    {"id": "MT-01", "cat": "multi_tool", "q": "打开空调并播放周杰伦的晴天", "expect": {"no_profile_update": true, "intent": "multi_tool"}},
+    {"id": "MT-02", "cat": "multi_tool", "q": "副驾空调22度，主驾座椅加热打开", "expect": {"no_profile_update": true, "intent": "multi_tool"}},
+    {"id": "MT-03", "cat": "multi_tool", "q": "打开空调，音量调到50，阅读灯打开", "expect": {"no_profile_update": true, "intent": "multi_tool"}},
+    {"id": "MT-04", "cat": "multi_tool", "q": "导航去五道口，顺便把空调打开", "expect": {"no_profile_update": true}},
+    {"id": "MT-05", "cat": "multi_tool", "q": "打开车窗通风，空调内循环，温度26度", "expect": {"no_profile_update": true, "intent": "multi_tool"}},
+    {"id": "MT-06", "cat": "multi_tool", "q": "左后座椅加热，右后23度，全车空调打开", "expect": {"no_profile_update": true}},
+    {"id": "MT-07", "cat": "multi_tool", "q": "播放民谣，空调24度，天窗开一半", "expect": {"no_profile_update": true}},
+    {"id": "MT-08", "cat": "multi_tool", "q": "关掉空调，音乐暂停，氛围灯调成蓝色", "expect": {"no_profile_update": true}},
+
+    {"id": "MI-01", "cat": "multi_intent", "q": "说话简洁点，我家在国贸，以后音乐偏好周杰伦", "expect": {"persona_updated": true, "memories_updated": true, "preferences_updated": true}},
+    {"id": "MI-02", "cat": "multi_intent", "q": "温柔点，女儿叫朵朵，以后叫我张总，副驾默认20度", "expect": {"persona_updated": true, "memories_updated": true, "preferences_updated": true}},
+    {"id": "MI-03", "cat": "multi_intent", "q": "专业一点，儿子叫天天，以后右后23度，叫我李哥", "expect": {"persona_updated": true, "memories_updated": true, "preferences_updated": true}},
+    {"id": "MI-04", "cat": "multi_intent", "q": "简洁干练，我住在西单，公司望京SOHO，以后全车22度，音乐古典", "expect": {"persona_updated": true, "memories_updated": true, "preferences_updated": true}},
+    {"id": "MI-05", "cat": "multi_intent", "q": "打开空调，我家在亦庄", "expect": {"memories_updated": true}},
+    {"id": "MI-06", "cat": "multi_intent", "q": "温柔点，打开车窗，以后叫我王总", "expect": {"persona_updated": true, "preferences_updated": true}},
+    {"id": "MI-07", "cat": "multi_intent", "q": "副驾调到23度，以后默认就这样", "expect": {"preferences_updated": true, "temp": 23}},
+    {"id": "MI-08", "cat": "multi_intent", "q": "活泼点，老婆小丽，喜欢摇滚，习惯中后25度", "expect": {"persona_updated": true, "memories_updated": true, "preferences_updated": true}},
+    {"id": "MI-09", "cat": "multi_intent", "q": "打开主驾座椅加热，以后记住我坐主驾", "expect": {"preferences_updated": true, "preferred_seat": "front_left"}},
+    {"id": "MI-10", "cat": "multi_intent", "q": "专业严谨，公司在国贸，女儿朵朵，叫我张总，全车21度", "expect": {"persona_updated": true, "memories_updated": true, "preferences_updated": true}},
+
+    {"id": "B-N01", "cat": "boundary", "q": "打开空调", "expect": {"no_profile_update": true}},
+    {"id": "B-N02", "cat": "boundary", "q": "现在调到26度", "expect": {"no_profile_update": true}},
+    {"id": "B-N03", "cat": "boundary", "q": "空调现在多少度", "expect": {"no_profile_update": true, "intent": "search"}},
+    {"id": "B-N04", "cat": "boundary", "q": "胎压怎么看", "expect": {"no_profile_update": true}},
+    {"id": "B-N05", "cat": "boundary", "q": "导航去五道口", "expect": {"no_profile_update": true}},
+    {"id": "B-N06", "cat": "boundary", "q": "今天天气真好，陪我说两句", "expect": {"no_profile_update": true}},
+
+    {"id": "CL-01", "cat": "clear", "q": "忘掉我的人设，恢复默认说话", "expect": {"persona_default": true}},
+    {"id": "CL-02", "cat": "clear", "q": "忘掉我女儿的名字", "expect": {"memory_not_contains": "小雨"}},
+    {"id": "CL-03", "cat": "clear", "q": "忘记我的偏好", "expect": {"prefs_cleared": true}},
+
+    {"id": "ST-01", "cat": "stress", "q": "简洁点，宠物咪咪，老婆小美，以后民谣，主驾24度，顺便打开空调", "expect": {"observe": true}},
+    {"id": "ST-02", "cat": "stress", "q": "温柔陪伴，家住望京，叫我老板，习惯副驾21度，喜欢爵士，打开车窗", "expect": {"observe": true}},
+    {"id": "ST-03", "cat": "stress", "q": "我是谁", "expect": {"observe": true}},
+
+    {"id": "C-MID", "cat": "compact_mid", "q": "(注入超长 transcript 并强制压缩)", "expect": {"observe": true}},
+
+    {"id": "V-01", "cat": "verify", "q": "打开空调", "expect": {"no_profile_update": true}}
+  ]
+}

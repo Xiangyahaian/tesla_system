@@ -1,7 +1,8 @@
 import { useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import type { TraceStep } from "@/lib/types";
-import { toShowcaseSteps, type ShowcaseStep } from "@/lib/trace";
+import { formatElapsed, toShowcaseSteps, type ShowcaseStep } from "@/lib/trace";
+import { ContextDocs, ManualImageRow } from "@/components/chat/ContextDocs";
 
 function statusWord(status?: string) {
   switch ((status || "ok").toLowerCase()) {
@@ -16,10 +17,14 @@ function statusWord(status?: string) {
   }
 }
 
-function StepRow({ step, defaultOpen }: { step: ShowcaseStep; defaultOpen?: boolean }) {
-  const [open, setOpen] = useState(!!defaultOpen);
-  const hasDetail = !!(step.detailLines && step.detailLines.length);
+function StepRow({ step }: { step: ShowcaseStep }) {
+  const [open, setOpen] = useState(false);
+  const hasDocs = !!(step.docs && step.docs.length);
+  const hasImages = !!(step.images && step.images.length);
+  const hasLines = !!(step.detailLines && step.detailLines.length);
+  const hasDetail = hasLines || hasDocs || hasImages;
   const tone = (step.status || "ok").toLowerCase();
+  const elapsed = formatElapsed(step.elapsedMs);
 
   return (
     <li className={`trace-step tone-${tone}`}>
@@ -31,7 +36,7 @@ function StepRow({ step, defaultOpen }: { step: ShowcaseStep; defaultOpen?: bool
         {hasDetail ? (
           <button
             type="button"
-            className="trace-step-head"
+            className={`trace-step-head${open ? " open" : ""}`}
             onClick={() => setOpen((v) => !v)}
             aria-expanded={open}
           >
@@ -43,6 +48,7 @@ function StepRow({ step, defaultOpen }: { step: ShowcaseStep; defaultOpen?: bool
               <span className="trace-step-title">{step.title}</span>
               {step.summary ? <span className="trace-step-summary">{step.summary}</span> : null}
             </div>
+            {elapsed ? <span className="trace-step-elapsed">{elapsed}</span> : <span />}
             <span className={`trace-step-chevron${open ? " open" : ""}`} aria-hidden />
           </button>
         ) : (
@@ -55,6 +61,7 @@ function StepRow({ step, defaultOpen }: { step: ShowcaseStep; defaultOpen?: bool
               <span className="trace-step-title">{step.title}</span>
               {step.summary ? <span className="trace-step-summary">{step.summary}</span> : null}
             </div>
+            {elapsed ? <span className="trace-step-elapsed">{elapsed}</span> : <span />}
           </div>
         )}
         <AnimatePresence initial={false}>
@@ -66,11 +73,19 @@ function StepRow({ step, defaultOpen }: { step: ShowcaseStep; defaultOpen?: bool
               exit={{ height: 0, opacity: 0 }}
               transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
             >
-              <ul>
-                {step.detailLines!.map((line, i) => (
-                  <li key={i}>{line}</li>
-                ))}
-              </ul>
+              {hasImages ? (
+                <div className="trace-step-media">
+                  <ManualImageRow images={step.images!} />
+                </div>
+              ) : null}
+              {hasDocs ? <ContextDocs docs={step.docs!} embedded /> : null}
+              {hasLines ? (
+                <ul>
+                  {step.detailLines!.map((line, i) => (
+                    <li key={i}>{line}</li>
+                  ))}
+                </ul>
+              ) : null}
             </motion.div>
           ) : null}
         </AnimatePresence>
@@ -82,18 +97,20 @@ function StepRow({ step, defaultOpen }: { step: ShowcaseStep; defaultOpen?: bool
 export function TurnRail({
   steps,
   compact = false,
+  endedAt,
 }: {
   steps: TraceStep[];
   /** 对话气泡内更紧凑 */
   compact?: boolean;
+  endedAt?: number;
 }) {
-  const showcase = toShowcaseSteps(steps);
+  const showcase = toShowcaseSteps(steps, endedAt);
   if (!showcase.length) return null;
 
   return (
     <ol className={`trace-rail${compact ? " compact" : ""}`} aria-label="本轮执行过程">
-      {showcase.map((s, i) => (
-        <StepRow key={s.id} step={s} defaultOpen={!compact && i === 0 && !!s.detailLines?.length} />
+      {showcase.map((s) => (
+        <StepRow key={s.id} step={s} />
       ))}
     </ol>
   );

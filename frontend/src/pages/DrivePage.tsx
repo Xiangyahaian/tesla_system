@@ -1,4 +1,4 @@
-import { motion } from "framer-motion";
+import { useEffect, useRef, useState } from "react";
 import { VoiceOrb } from "@/components/voice/VoiceOrb";
 import { ChatStream } from "@/components/chat/ChatStream";
 import { VehicleConsole } from "@/components/hud/VehicleConsole";
@@ -7,15 +7,24 @@ import { PresetQuestionsButton } from "@/components/drive/PresetQuestionsButton"
 import { ManualPreviewButton } from "@/components/drive/ManualPreviewButton";
 import { useCabinRuntime } from "@/hooks/useCabinRuntime";
 import { useCabinStore } from "@/store/cabinStore";
+import { fetchModelStatus } from "@/lib/api";
 import { unlockAudioPlayback } from "@/lib/speech";
 
-const fadeUp = {
-  initial: { opacity: 0, y: 12 },
-  animate: { opacity: 1, y: 0 },
-};
+function appendComposerText(current: string, extra: string): string {
+  const cur = current.trim();
+  const add = extra.trim();
+  if (!add) return current;
+  if (!cur) return add;
+  if (/[，,、；;。.!？?]$/.test(cur)) return `${cur}${add}`;
+  return `${cur}，${add}`;
+}
 
 export function DrivePage() {
-  const { draft, setDraft, onSubmit, onHoldStart, onHoldEnd, runQuery, doReset } = useCabinRuntime();
+  const { draft, setDraft, onSubmit, onHoldStart, onHoldEnd, startNewSession, onPauseToggle, canPause, pauseLabel } =
+    useCabinRuntime();
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+  const draftRef = useRef(draft);
+  draftRef.current = draft;
   const busy = useCabinStore((s) => s.busy);
   const model = useCabinStore((s) => s.model);
   const setModel = useCabinStore((s) => s.setModel);
@@ -24,17 +33,47 @@ export function DrivePage() {
   const setTtsEnabled = useCabinStore((s) => s.setTtsEnabled);
   const ttsVolume = useCabinStore((s) => s.ttsVolume);
   const setTtsVolume = useCabinStore((s) => s.setTtsVolume);
+  const sessionTitle = useCabinStore((s) => s.sessionTitle);
+  const setHistoryOpen = useCabinStore((s) => s.setHistoryOpen);
+  const [localHint, setLocalHint] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (model !== "local") {
+      setLocalHint(null);
+      return;
+    }
+    let cancelled = false;
+    void fetchModelStatus()
+      .then((s) => {
+        if (cancelled) return;
+        if (s.local_available) setLocalHint(null);
+        else setLocalHint(String(s.local_error || "本地模型未连通"));
+      })
+      .catch(() => {
+        if (!cancelled) setLocalHint("无法检查本地模型");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [model]);
 
   return (
     <div className="page-drive">
       <section className="drive-left" aria-label="对话区">
-        <motion.div
-          className="drive-left-head"
-          {...fadeUp}
-          transition={{ duration: 0.4, ease: [0.16, 1, 0.3, 1] }}
-        >
-          <div>
+        <div className="drive-left-head">
+          <div className="drive-session">
             <h1>小特助手</h1>
+            <button
+              type="button"
+              className="drive-history-open"
+              onClick={() => setHistoryOpen(true)}
+              title="打开会话历史"
+            >
+              <span>{sessionTitle || "主会话"}</span>
+              <svg viewBox="0 0 24 24" aria-hidden>
+                <path d="M8 10l4 4 4-4" />
+              </svg>
+            </button>
           </div>
           <div className="drive-left-actions">
             <button
@@ -72,38 +111,33 @@ export function DrivePage() {
               <option value="remote">云端模型</option>
               <option value="local">本地模型</option>
             </select>
-            <button type="button" className="btn ghost compact" onClick={() => void doReset()}>
-              重置会话
+            <button type="button" className="btn ghost compact" onClick={() => setHistoryOpen(true)}>
+              历史会话
+            </button>
+            <button type="button" className="btn ghost compact" onClick={() => void startNewSession()} title="新建对话，当前会话会留在历史里">
+              新会话
             </button>
           </div>
-        </motion.div>
+        </div>
 
-        <motion.div {...fadeUp} transition={{ delay: 0.06, duration: 0.45, ease: [0.16, 1, 0.3, 1] }}>
-          <VoiceOrb onHoldStart={onHoldStart} onHoldEnd={onHoldEnd} />
-        </motion.div>
+        <VoiceOrb onHoldStart={onHoldStart} onHoldEnd={onHoldEnd} />
 
+        {localHint ? <div className="inline-error">{localHint}</div> : null}
         {lastError ? <div className="inline-error">{lastError}</div> : null}
 
-        <motion.div
-          className="drive-chat-motion"
-          {...fadeUp}
-          transition={{ delay: 0.14, duration: 0.45, ease: [0.16, 1, 0.3, 1] }}
-        >
+        <div className="drive-chat-motion">
           <ChatStream />
-        </motion.div>
+        </div>
 
-        <motion.div
-          className="composer-dock"
-          {...fadeUp}
-          transition={{ delay: 0.2, duration: 0.45, ease: [0.16, 1, 0.3, 1] }}
-        >
+        <div className="composer-dock">
           <SeatSwitcher />
           <form className="composer" onSubmit={onSubmit}>
             <div className="composer-field">
               <textarea
+                ref={inputRef}
                 value={draft}
                 onChange={(e) => setDraft(e.target.value)}
-                placeholder="对小特说点什么… 点下方「输入示例」可选用附近美食、导航、空调等"
+                placeholder="对小特说点什么… 点「输入示例」可选用一条填入输入框"
                 rows={2}
                 onKeyDown={(e) => {
                   if (e.key === "Enter" && !e.shiftKey) {
@@ -116,28 +150,43 @@ export function DrivePage() {
                 <PresetQuestionsButton
                   compact
                   onPick={(q) => {
-                    void unlockAudioPlayback();
-                    void runQuery(q);
+                    const next = appendComposerText(draftRef.current, q);
+                    draftRef.current = next;
+                    setDraft(next);
+                    requestAnimationFrame(() => {
+                      const el = inputRef.current;
+                      if (!el) return;
+                      el.setSelectionRange(next.length, next.length);
+                    });
                   }}
-                  disabled={busy}
                 />
-                <button type="submit" className="btn primary compact" disabled={busy || !draft.trim()}>
-                  发送
-                </button>
+                <div className="composer-toolbar-actions">
+                  {canPause ? (
+                    <button
+                      type="button"
+                      className="btn ghost compact pause-btn"
+                      onClick={() => {
+                        void unlockAudioPlayback();
+                        onPauseToggle();
+                      }}
+                      title="暂停并撤回本轮，原文回到输入框"
+                    >
+                      {pauseLabel}
+                    </button>
+                  ) : null}
+                  <button type="submit" className="btn primary compact" disabled={busy || !draft.trim()}>
+                    发送
+                  </button>
+                </div>
               </div>
             </div>
           </form>
-        </motion.div>
+        </div>
       </section>
 
-      <motion.div
-        className="drive-right-motion"
-        initial={{ opacity: 0, x: 16 }}
-        animate={{ opacity: 1, x: 0 }}
-        transition={{ delay: 0.1, duration: 0.5, ease: [0.16, 1, 0.3, 1] }}
-      >
+      <div className="drive-right-motion">
         <VehicleConsole />
-      </motion.div>
+      </div>
     </div>
   );
 }

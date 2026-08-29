@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """SQLite 会话库：用户 / 元数据 / 消息 / 轨迹的权威索引。
 
-文件目录（vehicle.json、MEMORY.md 等）仍保留；SQLite 负责用户登录记录、
-会话列表、对话回放、跨重启一致性与 CRUD。
+文件目录（用户级 vehicle.json / memory，会话级 transcript）仍保留；
+SQLite 负责用户登录记录、会话列表、对话回放、跨重启一致性与 CRUD。
 """
 from __future__ import annotations
 
@@ -15,6 +15,20 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 from app import config
+
+
+def default_session_title(now: Optional[float] = None) -> str:
+    """新建会话的默认标题：会话 YYYY-MM-DD HH:MM。"""
+    from datetime import datetime
+
+    return datetime.fromtimestamp(now if now is not None else time.time()).strftime("会话 %Y-%m-%d %H:%M")
+
+
+def is_placeholder_title(title: str) -> bool:
+    t = (title or "").strip()
+    if t in {"新会话", "默认会话"}:
+        return True
+    return t.startswith("会话 ") and len(t) <= 22
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS sessions (
@@ -31,7 +45,8 @@ CREATE TABLE IF NOT EXISTS sessions (
   preview TEXT NOT NULL DEFAULT '',
   slots_json TEXT NOT NULL DEFAULT '{}',
   pending_json TEXT,
-  memory_compat_json TEXT NOT NULL DEFAULT '[]'
+  memory_compat_json TEXT NOT NULL DEFAULT '[]',
+  owner_id TEXT
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -102,6 +117,7 @@ class SessionDatabase:
         self._conn.execute("PRAGMA journal_mode = WAL")
         with self._conn:
             self._conn.executescript(_SCHEMA)
+        self._migrate_owner_column()
 
     def close(self) -> None:
         with self._lock:
@@ -110,27 +126,95 @@ class SessionDatabase:
     def _now(self) -> float:
         return time.time()
 
+    def _migrate_owner_column(self) -> None:
+        """已有库补 owner_id，并把登录主会话挂到对应用户。"""
+        with self._lock:
+            cols = [r[1] for r in self._conn.execute("PRAGMA table_info(sessions)").fetchall()]
+            if "owner_id" not in cols:
+                self._conn.execute("ALTER TABLE sessions ADD COLUMN owner_id TEXT")
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_sessions_owner ON sessions(owner_id)"
+            )
+            self._conn.execute(
+                """
+                UPDATE sessions
+                SET owner_id = (
+                  SELECT id FROM users WHERE users.session_id = sessions.id
+                )
+                WHERE owner_id IS NULL OR owner_id = ''
+                """
+            )
+            self._conn.commit()
+
+    def set_session_owner(self, session_id: str, owner_id: str) -> None:
+        sid = (session_id or "").strip()
+        oid = (owner_id or "").strip()
+        if not sid or not oid:
+            return
+        with self._lock:
+            self.ensure_session(sid)
+            self._conn.execute(
+                "UPDATE sessions SET owner_id = ? WHERE id = ?",
+                (oid, sid),
+            )
+            self._conn.commit()
+
+    def get_user_by_id(self, user_id: str) -> Optional[Dict[str, Any]]:
+        uid = (user_id or "").strip()
+        if not uid:
+            return None
+        with self._lock:
+            row = self._conn.execute("SELECT * FROM users WHERE id = ?", (uid,)).fetchone()
+            return self._row_to_user(row) if row else None
+
+    def session_owner_id(self, session_id: str) -> str:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT owner_id FROM sessions WHERE id = ?",
+                (session_id,),
+            ).fetchone()
+            if not row:
+                return ""
+            return str(row["owner_id"] or "").strip()
+
     def ensure_session(
         self,
         session_id: str,
         *,
         title: Optional[str] = None,
         created_at: Optional[float] = None,
+        owner_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         with self._lock:
             row = self._conn.execute(
                 "SELECT * FROM sessions WHERE id = ?", (session_id,)
             ).fetchone()
             if row:
+                if owner_id and not (row["owner_id"] if "owner_id" in row.keys() else None):
+                    self._conn.execute(
+                        "UPDATE sessions SET owner_id = ? WHERE id = ?",
+                        (owner_id, session_id),
+                    )
+                    self._conn.commit()
+                    row = self._conn.execute(
+                        "SELECT * FROM sessions WHERE id = ?", (session_id,)
+                    ).fetchone()
                 return dict(row)
             now = created_at or self._now()
             self._conn.execute(
                 """
                 INSERT INTO sessions (
-                  id, title, created_at, updated_at, last_active, status
-                ) VALUES (?, ?, ?, ?, ?, 'active')
+                  id, title, created_at, updated_at, last_active, status, owner_id
+                ) VALUES (?, ?, ?, ?, ?, 'active', ?)
                 """,
-                (session_id, title or ("默认会话" if session_id == "default" else "新会话"), now, now, now),
+                (
+                    session_id,
+                    title or ("默认会话" if session_id == "default" else "新会话"),
+                    now,
+                    now,
+                    now,
+                    owner_id,
+                ),
             )
             self._conn.commit()
             row = self._conn.execute(
@@ -236,16 +320,22 @@ class SessionDatabase:
                 "status": data["status"],
             }
 
-    def list_sessions(self, include_deleted: bool = False) -> List[Dict[str, Any]]:
+    def list_sessions(self, include_deleted: bool = False, owner_id: Optional[str] = None) -> List[Dict[str, Any]]:
         with self._lock:
-            if include_deleted:
-                rows = self._conn.execute(
-                    "SELECT * FROM sessions ORDER BY updated_at DESC"
-                ).fetchall()
-            else:
-                rows = self._conn.execute(
-                    "SELECT * FROM sessions WHERE status != 'deleted' ORDER BY updated_at DESC"
-                ).fetchall()
+            sql = """
+                SELECT s.*, u.nickname AS owner_nickname
+                FROM sessions s
+                LEFT JOIN users u ON u.id = s.owner_id
+                WHERE 1=1
+            """
+            params: List[Any] = []
+            if not include_deleted:
+                sql += " AND s.status != 'deleted'"
+            if owner_id:
+                sql += " AND s.owner_id = ?"
+                params.append(owner_id)
+            sql += " ORDER BY s.updated_at DESC"
+            rows = self._conn.execute(sql, params).fetchall()
             out = []
             for r in rows:
                 out.append(
@@ -260,13 +350,15 @@ class SessionDatabase:
                         "turn_count": r["turn_count"],
                         "transcript_chars": r["transcript_chars"],
                         "preview": r["preview"],
+                        "owner_id": r["owner_id"] if "owner_id" in r.keys() else "",
+                        "owner_nickname": r["owner_nickname"] if "owner_nickname" in r.keys() else "",
                     }
                 )
             return out
 
-    def create_session(self, title: Optional[str] = None) -> str:
+    def create_session(self, title: Optional[str] = None, owner_id: Optional[str] = None) -> str:
         sid = f"s{time.strftime('%Y%m%d')}_{uuid.uuid4().hex[:8]}"
-        self.ensure_session(sid, title=title or "新会话")
+        self.ensure_session(sid, title=title or default_session_title(), owner_id=owner_id)
         return sid
 
     def rename_session(self, session_id: str, title: str) -> bool:
@@ -389,15 +481,19 @@ class SessionDatabase:
                     """,
                     (len(content or ""), self._now(), self._now(), session_id),
                 )
-            # 首条用户消息自动命名
+            # 首条用户消息自动命名（跳过主会话：主会话在列表里显示为「主会话」）
             row = self._conn.execute(
                 "SELECT title, message_count FROM sessions WHERE id = ?", (session_id,)
             ).fetchone()
+            home = self._conn.execute(
+                "SELECT 1 FROM users WHERE session_id = ?", (session_id,)
+            ).fetchone()
             if (
                 row
+                and not home
                 and role == "user"
                 and content.strip()
-                and row["title"] in {"新会话", "默认会话"}
+                and is_placeholder_title(str(row["title"] or ""))
                 and int(row["message_count"] or 0) <= 2
             ):
                 auto = content.strip().replace("\n", " ")[:28]
@@ -702,7 +798,12 @@ class SessionDatabase:
         return count
 
     def migrate_from_filesystem(self, sessions_root: Path) -> int:
-        """把已有目录会话灌入 SQLite（幂等：已有消息则跳过灌入）。"""
+        """把已有目录会话灌入 SQLite（幂等：已有消息则跳过灌入）。
+
+        兼容两种布局：
+        - 旧：state/sessions/<sid>/{transcript.jsonl,session.jsonl,session.json,...}
+        - 新：state/sessions/<user_id>/sessions/<sid>/...
+        """
         from app.agent.trace import TurnTrace
         from app.agent.types import TranscriptMessage
 
@@ -710,18 +811,20 @@ class SessionDatabase:
         root = Path(sessions_root)
         if not root.exists():
             return 0
-        for d in sorted(root.iterdir()):
-            if not d.is_dir():
-                continue
-            sid = d.name
+
+        def ingest(d: Path, sid: str, owner_id: Optional[str] = None) -> None:
+            nonlocal count
             with self._lock:
                 existing = self._conn.execute(
                     "SELECT message_count FROM sessions WHERE id = ?", (sid,)
                 ).fetchone()
                 if existing and int(existing["message_count"] or 0) > 0:
-                    continue
-            self.ensure_session(sid, title="默认会话" if sid == "default" else sid)
-            # session.json
+                    return
+            self.ensure_session(
+                sid,
+                title="默认会话" if sid == "default" else sid,
+                owner_id=owner_id,
+            )
             sj = d / "session.json"
             if sj.exists():
                 try:
@@ -736,7 +839,6 @@ class SessionDatabase:
                     )
                 except Exception:
                     pass
-            # transcript
             tr = d / "transcript.jsonl"
             if tr.exists():
                 msgs = []
@@ -750,7 +852,6 @@ class SessionDatabase:
                         continue
                 if msgs:
                     self.replace_messages(sid, msgs)
-            # turns
             turns_path = d / "turns.jsonl"
             if turns_path.exists():
                 for line in turns_path.read_text(encoding="utf-8").splitlines():
@@ -763,6 +864,20 @@ class SessionDatabase:
                     except Exception:
                         continue
             count += 1
+
+        for d in sorted(root.iterdir()):
+            if not d.is_dir() or d.name == "sessions":
+                continue
+            nested = d / "sessions"
+            if nested.is_dir():
+                owner = d.name
+                for sd in sorted(nested.iterdir()):
+                    if sd.is_dir():
+                        ingest(sd, sd.name, owner_id=owner)
+                if (d / "transcript.jsonl").exists() or (d / "session.json").exists():
+                    ingest(d, d.name, owner_id=owner)
+            else:
+                ingest(d, d.name)
         return count
 
 

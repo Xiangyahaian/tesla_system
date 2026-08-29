@@ -7,6 +7,8 @@ let currentObjectUrl: string | null = null;
 let audioUnlocked = false;
 let playToken = 0;
 let currentAudioCtx: AudioContext | null = null;
+/** 用户主动暂停播报（可继续） */
+let userPaused = false;
 
 /** 静音短音：用于在用户手势里解锁浏览器自动播放策略 */
 const SILENT_WAV =
@@ -222,6 +224,7 @@ export async function recognizeBlob(blob: Blob): Promise<string> {
 }
 
 function cleanupAudio() {
+  userPaused = false;
   if (currentAudio) {
     try {
       currentAudio.pause();
@@ -246,8 +249,66 @@ function cleanupAudio() {
 }
 
 export function stopSpeaking() {
+  userPaused = false;
   playToken += 1;
   cleanupAudio();
+}
+
+/** 暂停当前播报（生成流需另行 abort）。返回是否成功进入暂停。 */
+export function pauseSpeaking(): boolean {
+  if (currentAudio && !currentAudio.paused && !currentAudio.ended) {
+    try {
+      currentAudio.pause();
+      userPaused = true;
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  if (currentAudioCtx && currentAudioCtx.state === "running") {
+    userPaused = true;
+    void currentAudioCtx.suspend();
+    return true;
+  }
+  return false;
+}
+
+/** 继续被暂停的播报 */
+export async function resumeSpeaking(): Promise<boolean> {
+  if (currentAudio && currentAudio.paused && !currentAudio.ended && currentAudio.src) {
+    try {
+      await currentAudio.play();
+      userPaused = false;
+      audioUnlocked = true;
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  if (currentAudioCtx && currentAudioCtx.state === "suspended") {
+    try {
+      await currentAudioCtx.resume();
+      userPaused = false;
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
+
+export function isSpeakingActive(): boolean {
+  if (userPaused) return false;
+  if (currentAudio && !currentAudio.paused && !currentAudio.ended) return true;
+  if (currentAudioCtx && currentAudioCtx.state === "running") return true;
+  return false;
+}
+
+export function isSpeakingPaused(): boolean {
+  if (!userPaused) return false;
+  if (currentAudio && currentAudio.paused && currentAudio.src && !currentAudio.ended) return true;
+  if (currentAudioCtx && currentAudioCtx.state === "suspended") return true;
+  return false;
 }
 
 function inferEmotionClient(text: string): string {
@@ -326,6 +387,7 @@ async function playPcmLive(volume: number, sampleRate: number, token: number) {
   return {
     push(bytes: Uint8Array) {
       if (token !== playToken || !bytes.length) return;
+      // 暂停时仍缓冲时间轴，恢复后从断点继续
       const merged = new Uint8Array(leftover.length + bytes.length);
       merged.set(leftover, 0);
       merged.set(bytes, leftover.length);
@@ -353,10 +415,18 @@ async function playPcmLive(volume: number, sampleRate: number, token: number) {
         return;
       }
       if (!started) throw new Error("语音合成未返回音频");
+      // 暂停期间不要提前 cleanup：等用户继续或 stop
+      while (token === playToken && userPaused) {
+        await new Promise((r) => window.setTimeout(r, 120));
+      }
+      if (token !== playToken) {
+        cleanupAudio();
+        return;
+      }
       const waitMs = Math.max(0, (nextStart - ctx.currentTime) * 1000) + 180;
       await new Promise<void>((resolve) => {
         window.setTimeout(() => {
-          if (token === playToken) cleanupAudio();
+          if (token === playToken && !userPaused) cleanupAudio();
           resolve();
         }, waitMs);
       });

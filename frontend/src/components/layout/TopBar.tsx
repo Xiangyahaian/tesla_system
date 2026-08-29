@@ -1,11 +1,9 @@
 import { useCabinStore } from "@/store/cabinStore";
-import { useCabinRuntime } from "@/hooks/useCabinRuntime";
 import { ManualPreviewButton } from "@/components/drive/ManualPreviewButton";
 
 export function TopBar({ title, subtitle }: { title: string; subtitle?: string }) {
   const model = useCabinStore((s) => s.model);
   const setModel = useCabinStore((s) => s.setModel);
-  const { doReset } = useCabinRuntime();
 
   return (
     <header className="cabin-top">
@@ -27,9 +25,6 @@ export function TopBar({ title, subtitle }: { title: string; subtitle?: string }
         <a className="link-quiet" href="/legacy" target="_blank" rel="noreferrer">
           旧版界面
         </a>
-        <button type="button" className="btn ghost compact" onClick={() => void doReset()}>
-          重置会话
-        </button>
       </div>
     </header>
   );

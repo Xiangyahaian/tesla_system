@@ -209,7 +209,15 @@ class StubVehicleGateway(VehicleGateway):
                 pass
         self._persist()
 
-    def _persist(self) -> None:
+    def _persist(self, force: bool = True) -> None:
+        now = time.time()
+        if not force:
+            last = getattr(self, "_last_persist_ts", 0.0)
+            if now - last < 1.2:
+                self._persist_dirty = True
+                return
+        self._persist_dirty = False
+        self._last_persist_ts = now
         self._state = touch(self._state)
         if not self.state_file:
             return
@@ -364,6 +372,40 @@ class StubVehicleGateway(VehicleGateway):
             meta = self._state.setdefault("meta", {})
             meta["updated_at"] = datetime.now().isoformat(timespec="seconds")
             meta["revision"] = int(meta.get("revision") or 0) + 1
+            self._persist()
+            return deepcopy(self._state)
+
+    def hold_departure(self, seconds: float = 2.0) -> Dict[str, Any]:
+        """新建会话等：车速钉 0，原地停 seconds 秒后再 ACC 起步。"""
+        with self._lock:
+            dyn = self._state.setdefault("dynamics", {})
+            adas = self._state.setdefault("driving", {}).setdefault("adas", {})
+            dyn["gear"] = "D"
+            dyn["parked"] = False
+            dyn["speed_kmh"] = 0.0
+            if dyn.get("cruise_set_kmh") is None:
+                dyn["cruise_set_kmh"] = 65.0
+            dyn["cruise_target_kmh"] = float(dyn.get("cruise_set_kmh") or 58.0)
+            adas.setdefault("acc", True)
+            adas["acc"] = True
+            adas["autopark"] = False
+            self._ensure_cruise_corridor_locked()
+            from app.maps import BIT_ZHONGGUANCUN_SOUTH_GATE
+
+            gate = BIT_ZHONGGUANCUN_SOUTH_GATE
+            nav = self._state.setdefault("navigation", {})
+            if not nav.get("navigating"):
+                nav["progress_m"] = 0.0
+                nav["mode"] = "cruising"
+                nav["position"] = {
+                    "lng": gate["lng"],
+                    "lat": gate["lat"],
+                    "name": gate["name"],
+                }
+                nav["origin_name"] = gate["name"]
+                if isinstance(nav.get("distance_m"), (int, float)):
+                    nav["remaining_m"] = float(nav["distance_m"])
+            dyn["hold_until_ts"] = time.time() + max(0.1, float(seconds))
             self._persist()
             return deepcopy(self._state)
 
@@ -841,8 +883,18 @@ class StubVehicleGateway(VehicleGateway):
         destination: str,
         preference: str = "fastest",
         origin: Optional[str] = None,
+        destination_location: Optional[str] = None,
     ) -> Dict[str, Any]:
         destination = (destination or "").strip()
+        if not destination:
+            return _fail("请告诉我目的地")
+        from app.nlu.destination_guard import (
+            is_relative_or_category_destination,
+            relative_destination_block_message,
+            strip_compound_tail_from_destination,
+        )
+
+        destination = strip_compound_tail_from_destination(destination)
         if not destination:
             return _fail("请告诉我目的地")
         try:
@@ -851,10 +903,6 @@ class StubVehicleGateway(VehicleGateway):
             destination = _normalize_place_query(destination)
         except Exception:
             pass
-        from app.nlu.destination_guard import (
-            is_relative_or_category_destination,
-            relative_destination_block_message,
-        )
 
         if is_relative_or_category_destination(destination):
             return _fail(
@@ -862,6 +910,7 @@ class StubVehicleGateway(VehicleGateway):
                 {"blocked_relative_destination": True, "destination": destination},
             )
         origin_name = (origin or "").strip() or None
+        dest_loc = (destination_location or "").strip()
 
         with self._lock:
             cur = deepcopy((self._state.get("navigation") or {}).get("position") or {})
@@ -874,9 +923,61 @@ class StubVehicleGateway(VehicleGateway):
                 plan_drive,
                 plan_drive_from_coords,
             )
+            from app.maps.amap_mcp import maps_direction_driving, polyline_length_m
 
+            # 候选澄清后已带坐标：直接规划，禁止再全文检索歧义
+            if dest_loc and "," in dest_loc:
+                if origin_name and origin_name in SOUTH_GATE_ALIASES:
+                    from app.maps import BIT_ZHONGGUANCUN_SOUTH_GATE
+
+                    o = BIT_ZHONGGUANCUN_SOUTH_GATE
+                    origin_loc = o["location"]
+                    oname = o["name"]
+                elif cur.get("lng") is not None and cur.get("lat") is not None:
+                    origin_loc = f"{float(cur['lng']):.6f},{float(cur['lat']):.6f}"
+                    oname = str(cur.get("name") or origin_name or "当前位置")
+                else:
+                    from app.maps import BIT_ZHONGGUANCUN_SOUTH_GATE
+
+                    o = BIT_ZHONGGUANCUN_SOUTH_GATE
+                    origin_loc = o["location"]
+                    oname = o["name"]
+                route = maps_direction_driving(origin_loc, dest_loc)
+                path0 = ((route.get("route") or {}).get("paths") or [{}])[0]
+                distance = float(path0.get("distance") or 0)
+                duration = float(path0.get("duration") or 0)
+                polyline = path0.get("polyline") or []
+                if not polyline:
+                    olng, olat = [float(x) for x in origin_loc.split(",")]
+                    dlng, dlat = [float(x) for x in dest_loc.split(",")]
+                    polyline = [[olng, olat], [dlng, dlat]]
+                    if distance <= 0:
+                        distance = polyline_length_m(polyline)
+                    if duration <= 0:
+                        duration = max(60.0, distance / 10.0)
+                olng, olat = [float(x) for x in origin_loc.split(",")]
+                dlng, dlat = [float(x) for x in dest_loc.split(",")]
+                plan = {
+                    "origin": {"name": oname, "location": origin_loc, "lng": olng, "lat": olat},
+                    "destination": {
+                        "name": destination,
+                        "location": dest_loc,
+                        "lng": dlng,
+                        "lat": dlat,
+                    },
+                    "distance_m": distance,
+                    "duration_sec": duration,
+                    "eta_min": max(1, int(round(duration / 60.0))),
+                    "steps": path0.get("steps") or [],
+                    "polyline": polyline,
+                    "progress_m": 0.0,
+                    "remaining_m": distance,
+                    "position": {"lng": olng, "lat": olat, "name": oname},
+                    "traffic": "畅通",
+                    "provider": "amap",
+                }
             # 优先：用户指定起点 → 否则从当前定位接续规划（巡航切导航不断档）
-            if origin_name and origin_name in SOUTH_GATE_ALIASES:
+            elif origin_name and origin_name in SOUTH_GATE_ALIASES:
                 plan = plan_drive(destination, origin_name=origin_name)
             elif origin_name:
                 plan = plan_drive(destination, origin_name=origin_name)
@@ -915,7 +1016,10 @@ class StubVehicleGateway(VehicleGateway):
                 return _fail(
                     f"没找到「{destination}」对应的地点。请反问用户换个更具体的名字再试。"
                 )
-            return _fail(f"导航暂时没规划成功：{e}")
+            return _fail(
+                "导航暂时没规划成功。换个更具体的地名再试。",
+                {"error": str(e)[:800]},
+            )
 
         with self._lock:
             dyn = self._state["dynamics"]
@@ -1041,7 +1145,10 @@ class StubVehicleGateway(VehicleGateway):
                 offset=8,
             )
         except Exception as e:
-            return _fail(f"地图服务连不上，没法查附近「{keywords}」。{e}")
+            return _fail(
+                f"地图服务连不上，没法查附近「{keywords}」。",
+                {"error": str(e)[:800]},
+            )
 
         pois = data.get("pois") or []
         if not pois:
@@ -1300,7 +1407,7 @@ class StubVehicleGateway(VehicleGateway):
                 if not nav.get("navigating"):
                     nav["mode"] = "cruising"
                 music_tick = self._tick_music_locked(dt)
-                self._persist()
+                self._persist(force=False)
                 return _ok(
                     "hold",
                     {
@@ -1414,16 +1521,30 @@ class StubVehicleGateway(VehicleGateway):
                                 "name": nav.get("destination") or (nav.get("position") or {}).get("name"),
                             }
                             if remain <= 8.0:
-                                # 导航到达 → 切回走廊巡航
+                                # 导航到达 → 原地驻车，等下次导航指令再起步
+                                dest_name = str(
+                                    nav.get("destination")
+                                    or (nav.get("position") or {}).get("name")
+                                    or "目的地"
+                                )
                                 nav["arrived"] = True
                                 nav["navigating"] = False
-                                nav["mode"] = "cruising"
-                                nav["destination"] = None
+                                nav["mode"] = "parked"
                                 nav["eta_min"] = 0
-                                if dyn.get("cruise_set_kmh") is None:
-                                    dyn["cruise_set_kmh"] = 65.0
-                                adas["acc"] = True
-                                self._ensure_cruise_corridor_locked(force=True)
+                                nav["remaining_m"] = 0.0
+                                nav["position"] = {
+                                    "lng": pos[0],
+                                    "lat": pos[1],
+                                    "name": dest_name,
+                                }
+                                dyn["gear"] = "P"
+                                dyn["parked"] = True
+                                dyn["speed_kmh"] = 0.0
+                                dyn["cruise_target_kmh"] = None
+                                adas["acc"] = False
+                                speed = 0.0
+                                parked = True
+                                gear = "P"
                             else:
                                 nav["arrived"] = False
                                 # ETA：优先按「规划总时长 × 剩余比例」衰减，避免跟瞬时车速一起乱跳
@@ -1495,7 +1616,7 @@ class StubVehicleGateway(VehicleGateway):
             _tick_cabin_notifications(self._state, dt)
 
             music_tick = self._tick_music_locked(dt)
-            self._persist()
+            self._persist(force=False)
             return _ok(
                 "dynamics tick",
                 {

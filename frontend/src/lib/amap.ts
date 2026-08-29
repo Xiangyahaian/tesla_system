@@ -36,6 +36,8 @@ type AMapNS = {
   Icon: new (opts: Record<string, unknown>) => unknown;
   Size: new (w: number, h: number) => unknown;
   Pixel: new (x: number, y: number) => unknown;
+  Buildings: new (opts?: Record<string, unknown>) => unknown;
+  TileLayer: new (opts?: Record<string, unknown>) => unknown;
 };
 
 declare global {

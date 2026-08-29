@@ -1,3 +1,5 @@
+import { stripEmoji } from "@/lib/answer";
+
 /** 手册回答：结论 / 步骤 / 小提示，正文内保留【n】引用编号 */
 
 function renderWithCites(text: string) {
@@ -14,54 +16,148 @@ function renderWithCites(text: string) {
   });
 }
 
-export function AnswerBody({ text }: { text: string }) {
-  if (!text) return null;
-  const lines = text.split(/\r?\n/);
-  const blocks: Array<{ type: "p" | "ol" | "tip" | "refs"; items: string[] }> = [];
-  let ol: string[] = [];
+type StepItem = { text: string; bullets: string[] };
 
-  const flushOl = () => {
-    if (ol.length) {
-      blocks.push({ type: "ol", items: ol });
-      ol = [];
+type Block =
+  | { type: "p"; text: string }
+  | { type: "steps"; items: StepItem[] }
+  | { type: "tip"; text: string }
+  | { type: "refs"; nums: string[] }
+  | { type: "nudge"; text: string };
+
+function normCompare(s: string) {
+  return s
+    .replace(/【\d+(?:\s*[,，、]\s*\d+)*】/g, "")
+    .replace(/[。！？!?,.，、；;：:\s]/g, "")
+    .trim();
+}
+
+function isUnreadNudge(line: string) {
+  return /未读消息/.test(line) && /您有|条未读/.test(line);
+}
+
+function parseBlocks(text: string): Block[] {
+  const lines = stripEmoji(text).split(/\r?\n/);
+  const blocks: Block[] = [];
+  let steps: StepItem[] | null = null;
+  let orphanBullets: string[] = [];
+
+  const flushSteps = () => {
+    if (orphanBullets.length) {
+      if (!steps) steps = [];
+      if (steps.length === 0) {
+        steps.push({ text: "", bullets: [...orphanBullets] });
+      } else {
+        steps[steps.length - 1].bullets.push(...orphanBullets);
+      }
+      orphanBullets = [];
+    }
+    if (steps?.length) {
+      blocks.push({ type: "steps", items: steps });
+      steps = null;
     }
   };
 
   for (const raw of lines) {
     const line = raw.trim();
-    if (!line) {
-      flushOl();
+    if (!line) continue;
+
+    if (isUnreadNudge(line)) {
+      flushSteps();
+      blocks.push({ type: "nudge", text: line });
       continue;
     }
+
     const step = line.match(/^(\d+)[\.、\)]\s*(.+)$/);
     if (step) {
-      ol.push(step[2]);
+      if (orphanBullets.length && steps?.length) {
+        steps[steps.length - 1].bullets.push(...orphanBullets);
+        orphanBullets = [];
+      }
+      if (!steps) steps = [];
+      steps.push({ text: step[2], bullets: [] });
       continue;
     }
-    flushOl();
+
+    const bullet = line.match(/^[-•*]\s+(.+)$/);
+    if (bullet) {
+      if (steps?.length) {
+        steps[steps.length - 1].bullets.push(bullet[1]);
+      } else {
+        orphanBullets.push(bullet[1]);
+      }
+      continue;
+    }
+
+    flushSteps();
     if (/^(小提示|提示|注意)[:：]/.test(line)) {
-      blocks.push({ type: "tip", items: [line.replace(/^(小提示|提示|注意)[:：]\s*/, "")] });
+      blocks.push({
+        type: "tip",
+        text: line.replace(/^(小提示|提示|注意)[:：]\s*/, ""),
+      });
     } else if (/^参考[:：]/.test(line)) {
-      // 总引用行：提取编号展示，不丢
       const nums = Array.from(line.matchAll(/【([^】]+)】/g))
         .flatMap((m) => m[1].split(/[,，、\s]+/))
         .map((s) => s.trim())
         .filter(Boolean);
-      if (nums.length) blocks.push({ type: "refs", items: nums });
+      if (nums.length) blocks.push({ type: "refs", nums });
     } else {
-      blocks.push({ type: "p", items: [line] });
+      blocks.push({ type: "p", text: line });
     }
   }
-  flushOl();
+  flushSteps();
+  return postProcessBlocks(blocks);
+}
+
+function postProcessBlocks(blocks: Block[]): Block[] {
+  const merged: Block[] = [];
+  for (const b of blocks) {
+    const prev = merged[merged.length - 1];
+    if (b.type === "steps" && prev?.type === "steps") {
+      prev.items.push(...b.items);
+    } else {
+      merged.push(b);
+    }
+  }
+
+  if (merged.length >= 2 && merged[0].type === "p" && merged[1].type === "steps") {
+    const lead = normCompare(merged[0].text);
+    const first = normCompare(merged[1].items[0]?.text || "");
+    if (lead && first && (lead === first || first.includes(lead) || lead.includes(first))) {
+      merged[1].items.shift();
+      if (merged[1].items.length === 0) merged.splice(1, 1);
+    }
+  }
+
+  const nudgeIdx = merged.map((b, i) => (b.type === "nudge" ? i : -1)).filter((i) => i >= 0);
+  if (nudgeIdx.length > 1) {
+    const keep = nudgeIdx[nudgeIdx.length - 1];
+    return merged.filter((b, i) => b.type !== "nudge" || i === keep);
+  }
+  return merged;
+}
+
+export function AnswerBody({ text }: { text: string }) {
+  if (!text) return null;
+  const blocks = parseBlocks(text);
 
   return (
     <div className="answer-body">
       {blocks.map((b, i) => {
-        if (b.type === "ol") {
+        if (b.type === "steps") {
           return (
             <ol key={i} className="answer-steps">
               {b.items.map((it, j) => (
-                <li key={j}>{renderWithCites(it)}</li>
+                <li key={j}>
+                  {it.text ? renderWithCites(it.text) : null}
+                  {it.bullets.length > 0 ? (
+                    <ul className="answer-substeps">
+                      {it.bullets.map((bt, k) => (
+                        <li key={k}>{renderWithCites(bt)}</li>
+                      ))}
+                    </ul>
+                  ) : null}
+                </li>
               ))}
             </ol>
           );
@@ -70,7 +166,7 @@ export function AnswerBody({ text }: { text: string }) {
           return (
             <div key={i} className="answer-tip">
               <span>小提示</span>
-              {renderWithCites(b.items[0])}
+              {renderWithCites(b.text)}
             </div>
           );
         }
@@ -78,7 +174,7 @@ export function AnswerBody({ text }: { text: string }) {
           return (
             <div key={i} className="answer-refs" aria-label="参考文档">
               <em>参考</em>
-              {b.items.map((n) => (
+              {b.nums.map((n) => (
                 <span key={n} className="cite-chip">
                   【{n}】
                 </span>
@@ -86,9 +182,16 @@ export function AnswerBody({ text }: { text: string }) {
             </div>
           );
         }
+        if (b.type === "nudge") {
+          return (
+            <p key={i} className="answer-screen-only">
+              {renderWithCites(b.text)}
+            </p>
+          );
+        }
         return (
           <p key={i} className={i === 0 ? "answer-lead" : undefined}>
-            {renderWithCites(b.items[0])}
+            {renderWithCites(b.text)}
           </p>
         );
       })}

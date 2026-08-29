@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Agent 消息与会话元数据（Claude Code 风格 transcript）。"""
+"""Agent 消息与会话元数据（transcript）。"""
 from __future__ import annotations
 
 from enum import Enum
@@ -46,7 +46,7 @@ class CompactReport(BaseModel):
 class ContextBundle(BaseModel):
     """一次模型调用前组装好的上下文。"""
     system: str
-    user_context: str  # CABIN.md / MEMORY / vehicle / compact summary
+    user_context: str  # persona / memories / preferences / vehicle / compact summary
     recent_dialog: str
     total_chars: int = 0
     sources: List[str] = Field(default_factory=list)

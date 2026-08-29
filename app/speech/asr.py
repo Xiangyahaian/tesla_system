@@ -71,14 +71,13 @@ def transcribe_audio(
         with request.urlopen(req, timeout=60) as resp:
             payload = json.loads(resp.read().decode("utf-8"))
     except error.HTTPError as e:
-        detail = e.read().decode("utf-8", errors="replace")[:400]
-        raise RuntimeError(f"ASR 请求失败 HTTP {e.code}: {detail}") from e
+        raise RuntimeError("语音识别暂时不可用") from e
     except Exception as e:
-        raise RuntimeError(f"ASR 请求失败: {e}") from e
+        raise RuntimeError("语音识别暂时不可用") from e
 
     try:
         text = payload["choices"][0]["message"]["content"]
     except (KeyError, IndexError, TypeError) as e:
-        raise RuntimeError(f"ASR 响应格式异常: {payload!r}") from e
+        raise RuntimeError("ASR 响应格式异常") from e
 
     return (text or "").strip()

@@ -1,0 +1,656 @@
+{
+  "meta": {
+    "title": "Tesla 车载助手 · 规则快路径全量目录",
+    "purpose": "供逐项审查；含运行时快路径、全局门禁、导航澄清规则、LLM 后处理门禁、辅助启发式",
+    "generated_note": "与代码同步快照，审查时请对照源文件行号",
+    "primary_sources": [
+      "app/nlu/fast_path.py",
+      "app/nlu/destination_guard.py",
+      "app/nlu/nav_resolve.py",
+      "app/nlu/planner.py",
+      "app/orchestrator/runtime.py",
+      "app/gateway/apps_catalog.py"
+    ],
+    "legend": {
+      "status_active": "当前运行时生效",
+      "status_deprecated": "函数保留但主路径不再调用 / 恒返回 None",
+      "status_auxiliary": "不直接路由，用于排斥、纠偏或闲聊补搜",
+      "status_post_llm": "StructuredNLU 规划之后的硬门禁"
+    }
+  },
+  "routing_pipeline": {
+    "description": "runtime.handle 内规则相关执行顺序（简图）",
+    "steps": [
+      {
+        "order": 0,
+        "name": "pending 确认门控",
+        "function": "try_confirm_utterance",
+        "file": "app/nlu/fast_path.py",
+        "condition": "sess.pending != null",
+        "category_id": "02_confirm_cancel"
+      },
+      {
+        "order": 1,
+        "name": "寒暄直达回复",
+        "function": "try_greeting_reply",
+        "file": "app/nlu/fast_path.py",
+        "note": "直接写 transcript，不进 NLU",
+        "category_id": "03_greeting"
+      },
+      {
+        "order": 2,
+        "name": "导航候选待选门禁",
+        "function": "resolve_nav_selection + try_nav_candidate_utterance",
+        "file": "app/nlu/nav_resolve.py, app/nlu/fast_path.py",
+        "condition": "sess.slots.nav_candidates 存在",
+        "category_id": "04_nav_clarification"
+      },
+      {
+        "order": 3,
+        "name": "快路径总入口",
+        "function": "try_fast_path_route",
+        "file": "app/nlu/fast_path.py",
+        "category_id": "05_fast_path_route"
+      },
+      {
+        "order": 4,
+        "name": "StructuredNLU 语义规划",
+        "function": "StructuredNLU.plan",
+        "file": "app/nlu/planner.py",
+        "note": "非快规则；复杂句 / 未命中快路径时走 LLM"
+      },
+      {
+        "order": 5,
+        "name": "NLU 断连恢复快路径",
+        "function": "try_app / try_nearby / try_web_search / try_direct_cabin",
+        "file": "app/orchestrator/runtime.py",
+        "condition": "route.intent==chat 且 (NLU失败 或 confidence<0.35) 且非 should_skip_code_fast_path",
+        "category_id": "05_fast_path_route"
+      },
+      {
+        "order": 6,
+        "name": "闲聊升格周边",
+        "function": "try_nearby_utterance",
+        "file": "app/orchestrator/runtime.py _handle_chat",
+        "category_id": "08_nearby_maps"
+      },
+      {
+        "order": 7,
+        "name": "闲聊升格网页搜",
+        "function": "try_web_search_utterance / chat_web_query",
+        "file": "app/orchestrator/runtime.py, app/nlu/fast_path.py",
+        "category_id": "09_web_search"
+      }
+    ]
+  },
+  "categories": [
+    {
+      "id": "01_global_gates",
+      "name": "全局门禁（是否允许走代码快路径）",
+      "file": "app/nlu/destination_guard.py",
+      "status": "active",
+      "rules": [
+        {
+          "id": "gate_complex_length",
+          "name": "复杂句长度门禁",
+          "function": "is_complex_utterance / should_skip_code_fast_path",
+          "status": "active",
+          "condition": "len(query.strip()) > COMPLEX_UTTERANCE_MIN_CHARS",
+          "constant": { "COMPLEX_UTTERANCE_MIN_CHARS": 10 },
+          "effect": "try_fast_path_route 返回 None，交 StructuredNLU",
+          "examples_skip": [
+            "帮我导航到中关村软件园",
+            "导航到中关村软件园，副驾空调22度，播放周杰伦的晴天"
+          ],
+          "examples_allow": ["打开空调", "我在哪", "自动泊车怎么用"]
+        },
+        {
+          "id": "gate_compound_multi_tool",
+          "name": "多域复合句门禁",
+          "function": "is_compound_multi_tool_utterance",
+          "status": "active",
+          "condition": "detect_utterance_domains 含 navigation 且另有其它域（climate/media/maps/cabin/apps）",
+          "domain_patterns": [
+            { "domain": "navigation", "pattern": "导航|带我去|我想去|开导航|目的地" },
+            { "domain": "climate", "pattern": "空调|温度|制冷|制热|风量|内循环|外循环|\\d{2}\\s*度" },
+            { "domain": "media", "pattern": "播放|放首|放一首|来首|听一下|听首|音乐|电台|音量|下一首|上一首" },
+            { "domain": "maps", "pattern": "附近|周边|旁边|充电站|加油站|停车场|美食|餐厅" },
+            { "domain": "cabin", "pattern": "车窗|天窗|后备箱|前备箱|氛围灯|阅读灯" },
+            { "domain": "apps", "pattern": "打开.{0,6}(飞书|微信|地图|高德|美团|应用)" }
+          ],
+          "effect": "跳过代码快路径（导航澄清选点除外）",
+          "examples_skip": ["导航到中关村软件园，副驾空调22度，播放周杰伦的晴天"]
+        },
+        {
+          "id": "gate_compound_dest_strip",
+          "name": "导航目的地复合尾巴截断",
+          "function": "strip_compound_tail_from_destination",
+          "status": "post_llm",
+          "file": "app/nlu/destination_guard.py + app/nlu/planner.py sanitize + app/gateway/stub.py navigate_to",
+          "tail_patterns": [
+            "[，,；;]\\s*(副驾|主驾|驾驶位|后排|左后|右后|中后).*$",
+            "[，,；;]\\s*(空调|温度|制冷|制热|风量).*$",
+            "[，,；;]\\s*(\\d{2})\\s*度.*$",
+            "[，,；;]\\s*(播放|放首|放一首|来首|听一下|听首|播).*$",
+            "[，,；;]\\s*(顺便|并且|同时|还要|再).*$"
+          ],
+          "example": {
+            "before": "中关村软件园，副驾空调22度，播放周杰伦的晴天",
+            "after": "中关村软件园"
+          }
+        },
+        {
+          "id": "gate_relative_destination",
+          "name": "相对/类别目的地禁止 navigate_to",
+          "function": "is_relative_or_category_destination",
+          "status": "post_llm",
+          "relative_pattern": "最近|附近|周边|旁边|四周|就近|顺路|找个|找一家|随便|任意|有什么|有哪些|哪儿有|哪里有",
+          "category_only_words": [
+            "商场", "购物中心", "超市", "便利店", "美食", "餐厅", "饭店", "咖啡", "咖啡馆", "咖啡厅",
+            "充电站", "超充", "加油站", "停车场", "厕所", "卫生间", "药店", "医院", "景点", "公园"
+          ],
+          "examples_block": ["最近的商场", "附近充电站", "商场"]
+        }
+      ]
+    },
+    {
+      "id": "02_confirm_cancel",
+      "name": "确认 / 取消（pending 门控）",
+      "file": "app/nlu/fast_path.py",
+      "function": "try_confirm_utterance",
+      "status": "active",
+      "max_length": null,
+      "confirm_phrases_exact": [
+        "确认", "确定", "好的", "好的呀", "好呀", "好啊", "好", "可以", "可以的", "行", "行啊",
+        "执行", "是", "是的", "嗯", "嗯嗯", "读吧", "看着吧", "看一下", "同意", "没问题", "继续",
+        "yes", "y", "ok", "okay"
+      ],
+      "cancel_phrases_exact": [
+        "取消", "不要", "算了", "否", "不用了", "先别", "别读了", "不看了", "别了", "停", "停下", "no", "n"
+      ],
+      "normalization": "strip + lower + 去掉末尾 ！!。.?？~～",
+      "intent": { "confirm": "CONFIRM", "cancel": "CANCEL" },
+      "examples_not_hijacked": ["我现在播放的音乐是什么", "打开空调", "自动泊车怎么用"]
+    },
+    {
+      "id": "02b_pending_hold",
+      "name": "Pending 保留（短糊糊话不覆盖 pending）",
+      "file": "app/nlu/fast_path.py",
+      "function": "is_pending_hold_utterance",
+      "status": "active",
+      "phrases_exact": [
+        "嗯？", "啊？", "哦？", "什么？", "啥？", "？", "?", "…", "...",
+        "什么", "啥", "再说", "再说一遍", "什么意思"
+      ],
+      "short_filler_len_le_2": ["啊", "哦", "噢", "额", "呃"],
+      "empty_query": true
+    },
+    {
+      "id": "03_greeting",
+      "name": "寒暄直达",
+      "file": "app/nlu/fast_path.py",
+      "function": "try_greeting_reply",
+      "status": "active",
+      "max_length": 24,
+      "phrases_exact": [
+        "你好", "您好", "嗨", "哈喽", "hello", "hi", "hey", "在吗", "在不在", "你在吗",
+        "小特", "小特你好", "你好小特", "早上好", "中午好", "下午好", "晚上好"
+      ],
+      "regex_fullmatch": "(小特[，,\\s]*)?(你好|您好|在吗|嗨)",
+      "fixed_reply": "【听】在呢，有事直接说就行。",
+      "note": "不进 NLU，不写 tool_calls"
+    },
+    {
+      "id": "04_nav_clarification",
+      "name": "导航澄清选点（有 nav_candidates 时）",
+      "file": "app/nlu/nav_resolve.py",
+      "status": "active",
+      "entry": "try_nav_candidate_utterance → resolve_nav_selection",
+      "rule_first_llm_fallback": "规则未命中时 _llm_resolve_nav_selection（LLM 在候选内选）",
+      "rules": [
+        {
+          "id": "nav_cancel",
+          "function": "_is_cancel",
+          "patterns": [
+            "^(取消|算了|不用了|不导航|别导了|先别|不要了)(导航|吧|啊|呀)?$",
+            "取消导航|不走了|不去了"
+          ],
+          "action": "clear"
+        },
+        {
+          "id": "nav_off_topic",
+          "function": "_is_off_topic_from_nav",
+          "exempt_if": "(第\\s*[一二三四五六七八九\\d]+\\s*(个|项|处|号|家)|那家|这家|上面|下面)",
+          "patterns": "空调|温度|制热|制冷|座椅|车窗|天窗|氛围灯|阅读灯|放首歌|下一首|暂停|继续播放|音量|打开微信|打开地图|锁车|解锁|后备箱|哨兵|玩具箱|用户手册|怎么用|如何|为什么|讲个笑话|你好|谢谢|几点了|网上\\s*搜|搜一下|百度|谷歌|google|网页搜|搜索一下|好玩|有什么好玩|推荐一下|介绍一下",
+          "action": "clear",
+          "reason": "用户换题，释放导航候选"
+        },
+        {
+          "id": "nav_explicit_new_dest",
+          "function": "_is_explicit_new_destination",
+          "action": "new_destination",
+          "note": "否定候选+新意向 / 换地方 / 导航到与候选几乎无重合的新地名"
+        },
+        {
+          "id": "nav_reject_candidates",
+          "function": "_is_reject_current_candidates",
+          "patterns": "都(不想要|不要|不是|不对|别去|不要了)|这些?(都)?(不要|不行|不对|别)|换(一批|别的|其他|其它)|^(不行|不对|不是|都不是|都不要)",
+          "action": "clear"
+        },
+        {
+          "id": "nav_index_pick",
+          "function": "_index_pick",
+          "patterns": [
+            "纯数字 1-4",
+            "(?:选\\s*)?(?:第\\s*)([1-4一二两三四])\\s*(?:个|项|处|号|家)?",
+            "(?:选\\s*)([1-4])\\s*(?:个|项|处|号|家)"
+          ],
+          "forbidden": "禁止把「一下/一样」里的「一」当成第 1 个",
+          "action": "navigate"
+        },
+        {
+          "id": "nav_full_name_pick",
+          "function": "_resolve_nav_selection_rules",
+          "condition": "候选全称 len>=4 且 (name==core 或 name in text)",
+          "action": "navigate",
+          "reason": "点名全称"
+        },
+        {
+          "id": "nav_constraint_filter",
+          "function": "_filter_by_constraints / _constraint_tokens",
+          "note": "A口/B口/南口/数字口/汉字约束，用于 LLM 前后辅助",
+          "status": "auxiliary"
+        }
+      ],
+      "tool_on_navigate": {
+        "name": "navigation.navigate_to",
+        "arguments": ["destination", "preference=fastest", "destination_location?"]
+      }
+    },
+    {
+      "id": "05_fast_path_route",
+      "name": "快路径总入口 try_fast_path_route",
+      "file": "app/nlu/fast_path.py",
+      "status": "active",
+      "priority_order": [
+        { "step": 1, "function": "try_nav_candidate_utterance", "bypass_global_gate": true },
+        { "step": 2, "function": "should_skip_code_fast_path", "if_true": "return None" },
+        { "step": 3, "function": "try_app_utterance" },
+        { "step": 4, "function": "try_status_utterance" },
+        { "step": 5, "function": "try_direct_cabin_utterance" },
+        { "step": 6, "function": "try_nearby_utterance" },
+        { "step": 7, "function": "try_web_search_utterance" }
+      ],
+      "explicitly_removed_from_chain": [
+        "try_knowledge_utterance（手册，已废弃）",
+        "try_navigate_utterance（单句导航正则，已废弃）",
+        "try_combo_cabin_utterance（未接入本链，函数仍存在）"
+      ]
+    },
+    {
+      "id": "06_app_launch",
+      "name": "打开/关闭 App",
+      "file": "app/nlu/fast_path.py",
+      "function": "try_app_utterance",
+      "status": "active",
+      "max_length": 36,
+      "action_regex": "(打开|开启|启动|关掉|关闭|退出)\\s*(.+)$",
+      "exclude_object_if_contains": ["空调", "天窗", "车窗", "导航", "音乐", "歌", "电台", "座椅", "门", "锁"],
+      "tool": { "name": "apps.launch", "arguments": ["app_name", "enable"] },
+      "app_catalog_file": "app/gateway/apps_catalog.py",
+      "installed_apps": [
+        { "name": "地图", "aliases": ["车载地图", "导航app"] },
+        { "name": "音乐", "aliases": ["车载音乐"] },
+        { "name": "电台", "aliases": ["广播", "radio"] },
+        { "name": "电话", "aliases": ["通话", "phone"] },
+        { "name": "邮箱", "aliases": ["邮件", "email", "mail"] },
+        { "name": "浏览器", "aliases": ["browser"] },
+        { "name": "摄像头", "aliases": ["行车记录仪", "camera"] },
+        { "name": "充电", "aliases": ["充电管理"] },
+        { "name": "设置", "aliases": ["系统设置", "settings"] },
+        { "name": "飞书", "aliases": ["lark", "Lark"] },
+        { "name": "钉钉", "aliases": ["dingtalk", "DingTalk"] },
+        { "name": "微信", "aliases": ["wechat", "WeChat"] },
+        { "name": "QQ", "aliases": ["qq"] },
+        { "name": "腾讯会议", "aliases": ["会议", "tencent meeting"] },
+        { "name": "高德地图", "aliases": ["高德", "amap"] },
+        { "name": "腾讯地图", "aliases": [] },
+        { "name": "百度", "aliases": ["百度一下", "baidu"] },
+        { "name": "美团", "aliases": ["meituan"] },
+        { "name": "携程", "aliases": ["ctrip"] },
+        { "name": "支付宝", "aliases": ["alipay"] },
+        { "name": "淘宝", "aliases": ["taobao"] },
+        { "name": "拼多多", "aliases": ["pdd", "拼夕夕"] },
+        { "name": "网易云音乐", "aliases": ["网易云", "云音乐"] },
+        { "name": "QQ音乐", "aliases": ["qq音乐"] },
+        { "name": "爱奇艺视频", "aliases": ["爱奇艺"] },
+        { "name": "腾讯视频", "aliases": [] }
+      ],
+      "match_strategy": "别名按长度降序；low== / startswith / in"
+    },
+    {
+      "id": "07_status_search",
+      "name": "车况查询（SEARCH，无 tool_calls）",
+      "file": "app/nlu/fast_path.py",
+      "function": "try_status_utterance",
+      "status": "active",
+      "branches": [
+        {
+          "id": "status_lights",
+          "reason": "查询灯光状态",
+          "exclude": "句中含「灯光秀」",
+          "patterns": [
+            "(氛围灯|阅读灯|顶灯|(?<!秀)灯光).{0,8}(开了吗|关了吗|开着|关着|亮着|亮不亮|状态)",
+            "(开着|关着|开了|关了).{0,6}(氛围灯|阅读灯|顶灯|灯光)|(氛围灯|阅读灯|顶灯|灯光).{0,6}(开着|关着|开了吗|关了吗)",
+            "(现在|当前).{0,4}(氛围灯|阅读灯|顶灯|灯光)"
+          ]
+        },
+        {
+          "id": "status_location",
+          "reason": "查询当前位置",
+          "patterns": [
+            "(我|我们|这辆车|车子).{0,8}(现在|当前)?.{0,4}(在哪|在哪里|在哪儿|什么地方|哪个位置|啥地方)",
+            "(现在|当前).{0,4}(在哪|在哪里|在哪儿|位置|定位)",
+            "(到哪了|到哪儿了)",
+            "fullmatch: (我|我们)?(现在|当前)?(在哪|在哪里|在哪儿|什么地方|哪个位置)[儿啊呀呢吧哦噢～~？?。！!\\s]*$"
+          ],
+          "note": "不要把「好看在哪里」当成定位（需 fullmatch 或主语约束）"
+        },
+        {
+          "id": "status_nav_eta",
+          "reason": "查询导航进度",
+          "patterns": [
+            "(还差|还有|剩余|还要).{0,6}(几分钟|多久|多远|几公里|多少公里|多少分钟)",
+            "(多久|几点).{0,4}(到|到达)|(ETA|预计).{0,4}(到达|时间)",
+            "还差几分钟|还有多久|还有多远|还要多久",
+            "^(还差多少|还有多久|还有多远|还要多久|预计到达|什么时候到)[？?]?$"
+          ]
+        }
+      ],
+      "intent": "SEARCH"
+    },
+    {
+      "id": "08_direct_cabin",
+      "name": "舱体/连接/消息直达",
+      "file": "app/nlu/fast_path.py",
+      "function": "try_direct_cabin_utterance",
+      "status": "active",
+      "branches": [
+        {
+          "id": "cabin_read_messages",
+          "reason": "查询消息（需确认）",
+          "tool": "notifications.list_messages",
+          "arguments": { "unread_only": "句中含「未读」", "mark_read": true },
+          "patterns": [
+            "(授权|允许|可以).*(读|看|查).*(消息|微信|短信)|(读|看|查).*(消息|微信|短信).*(授权|允许)",
+            "^(授权读取消息|授权消息|可以读消息|允许读消息)$",
+            "(哪些|什么|有没有|收到|未读).*(消息|微信|短信)|(消息|微信|短信).*(哪些|什么|未读|一下)|读一下.*(消息|微信|短信)"
+          ]
+        },
+        {
+          "id": "cabin_mark_all_read",
+          "reason": "消息全部已读",
+          "tool": "notifications.mark_read",
+          "arguments": { "all_unread": true },
+          "pattern": "(全部已读|都已读|标成已读|标记已读)"
+        },
+        {
+          "id": "cabin_wifi_on",
+          "tool": "connectivity.set_wifi",
+          "arguments": { "enable": true },
+          "pattern": "(开|打开|开启).*(wifi|Wi‑?Fi|无线网|热点)"
+        },
+        {
+          "id": "cabin_wifi_off",
+          "tool": "connectivity.set_wifi",
+          "arguments": { "enable": false },
+          "pattern": "(关|关闭|断开).*(wifi|Wi‑?Fi|无线网|热点)"
+        },
+        {
+          "id": "cabin_ac_on",
+          "tool": "climate.set_power",
+          "arguments": { "enable": true },
+          "patterns": [
+            "^(帮我)?(把)?空调(打开|开启|开一下|开着)?$",
+            "^(打开|开启)空调$",
+            "把空调打开"
+          ],
+          "note": "座位与温度由 memory + active_seat 补全"
+        },
+        {
+          "id": "cabin_ac_off",
+          "tool": "climate.set_power",
+          "arguments": { "enable": false },
+          "patterns": [
+            "^(帮我)?(把)?空调(关掉|关闭|关上)$",
+            "^(关闭|关掉)空调$"
+          ]
+        },
+        {
+          "id": "cabin_sunroof",
+          "requires": "句中含「天窗」",
+          "tool": "cabin.set_windows",
+          "close_pattern": "(关|收起|合上|关上) → percent=0",
+          "open_pattern": "(开|打开|开启|升起|全开) → percent=100",
+          "arguments": { "positions": ["sunroof"] }
+        }
+      ]
+    },
+    {
+      "id": "09_nearby_maps",
+      "name": "周边生活服务",
+      "file": "app/nlu/fast_path.py",
+      "function": "try_nearby_utterance",
+      "status": "active",
+      "prerequisite": "(附近|周边|旁边|四周|这附近|我附近) 或 (充电站|超充|加油站).*(哪|有|推荐)|(哪|有|推荐).*(充电站|超充|加油站)",
+      "keyword_rules": [
+        { "pattern": "(好吃|美食|餐厅|饭店|小吃|晚饭|午饭|早餐|宵夜|火锅|烧烤)", "keywords": "美食", "reason": "附近美食" },
+        { "pattern": "(咖啡|咖啡厅|喝咖啡)", "keywords": "咖啡", "reason": "附近咖啡" },
+        { "pattern": "(充电站|超充|充电桩|补能)", "keywords": "充电站", "reason": "附近充电站" },
+        { "pattern": "(加油站|加油)", "keywords": "加油站", "reason": "附近加油站" },
+        { "pattern": "(停车场|停车|泊车位)", "keywords": "停车场", "reason": "附近停车场" },
+        { "pattern": "(厕所|卫生间|洗手间)", "keywords": "公共厕所", "reason": "附近卫生间" },
+        { "pattern": "(景点|好玩|逛逛|公园)", "keywords": "风景名胜", "reason": "附近景点" },
+        { "pattern": "(药店|医院|诊所)", "keywords": "药店", "reason": "附近药店" },
+        { "pattern": "(便利店|超市)", "keywords": "便利店", "reason": "附近便利店" },
+        { "pattern": "(附近|周边|旁边).{0,8}(有什么|有哪些)", "keywords": "生活服务", "reason": "附近推荐" }
+      ],
+      "tool": { "name": "maps.search_nearby", "default_radius": 3000 },
+      "explicit_non_match": "「去周边转转你推荐哪」类陪聊不接"
+    },
+    {
+      "id": "10_web_search",
+      "name": "网页搜索快路径",
+      "file": "app/nlu/fast_path.py",
+      "function": "try_web_search_utterance",
+      "helper": "extract_web_query",
+      "status": "active",
+      "max_length": 80,
+      "command_regexes": [
+        "^(?:请|麻烦|帮我|给我)?(?:在网上|网上|用百度|百度|谷歌|google)?(?:搜(?:索|一下|一搜|搜)?|查(?:一下|一查)?|百度一下)\\s*(.+)$",
+        "^(?:请|麻烦|帮我|给我)?百度一下\\s*(.+)$"
+      ],
+      "news_fallback_patterns": [
+        "(昨天|昨日|今天|今日|最近|本周|这一周|一周).{0,16}(新闻|热点|头条|大事)",
+        "(总结|梳理).{0,16}(新闻|热点|大事)"
+      ],
+      "news_fallback_exclude": "(附近|导航|手册|怎么用)",
+      "reject_if": [
+        "looks_like_vehicle_knowledge(q)",
+        "looks_like_smalltalk(q)",
+        "_NEARBY_STEAL: (附近|周边|旁边).{0,8}(餐厅|美食|充电|加油|停车|咖啡|酒店|厕所)",
+        "(搜|找|查).{0,4}(附近|周边)",
+        "rest 以 附近|周边|旁边 开头",
+        "rest 含 电量|续航|胎压|音量|空调|温度|车窗|座椅|正在播|在听什么",
+        "rest 长度 < 2"
+      ],
+      "tool": { "name": "web.search", "arguments": { "query": "extracted", "count": 5 } }
+    },
+    {
+      "id": "11_chat_web_auxiliary",
+      "name": "闲聊路径网页补搜（非 try_fast_path_route 主链）",
+      "file": "app/nlu/fast_path.py",
+      "function": "chat_web_query",
+      "status": "auxiliary",
+      "used_in": "runtime._handle_chat",
+      "topic_pattern": "(电影|影片|片子|片单|影讯|上映|院线|豆瓣|想看片|好看的片|电视剧|剧集|综艺)",
+      "followup_pattern": "(这个|这部|那部|刚才(?:说|提)的).{0,12}(电影|片子|片|剧)|(好看在哪|为什么好看|值不值得看|剧情怎么样|口碑怎么样|评分怎么样)",
+      "reject_if": [
+        "looks_like_vehicle_knowledge",
+        "_NEARBY_STEAL 或 搜/找/查+附近/周边",
+        "(打开|关掉|关闭).{0,6}(空调|车窗|天窗|导航|音乐)"
+      ],
+      "max_query_len": 80
+    },
+    {
+      "id": "12_combo_cabin",
+      "name": "一句话多工具（硬编码，未接入主快路径链）",
+      "file": "app/nlu/fast_path.py",
+      "function": "try_combo_cabin_utterance",
+      "status": "deprecated",
+      "note": "should_skip_code_fast_path 为 true 时直接 return None；try_fast_path_route 未调用本函数",
+      "detection": {
+        "has_nav": "导航到|(导航|开导航).{0,16}(软件园|五道口|西单|西站)",
+        "has_climate": "(空调|温度).{0,10}\\d{2}\\s*度|\\d{2}\\s*度.{0,6}(空调|温度)",
+        "has_music": "(播放|放首|放一?首|听).{0,16}(晴天|歌|音乐|周杰伦)",
+        "min_domains": 2
+      },
+      "hardcoded_destinations": {
+        "默认": "中关村软件园",
+        "五道口": "五道口地铁站",
+        "西单": "西单大悦城",
+        "西站": "北京西站"
+      },
+      "hardcoded_music": { "artist_if_周杰伦": "周杰伦", "title_if_晴天": "晴天" },
+      "tools": ["navigation.navigate_to", "climate.set_power", "climate.set_temperature", "media.play_music"]
+    },
+    {
+      "id": "13_deprecated_stubs",
+      "name": "已废弃 / 恒空实现",
+      "status": "deprecated",
+      "items": [
+        {
+          "function": "try_navigate_utterance",
+          "file": "app/nlu/fast_path.py",
+          "note": "曾用正则 导航到|导航去|…\\s*(.+)$ 抽 destination；现恒 return None"
+        },
+        {
+          "function": "try_knowledge_utterance",
+          "file": "app/nlu/fast_path.py",
+          "note": "曾用手册正则直达 knowledge；现恒 return None，手册走 StructuredNLU"
+        },
+        {
+          "function": "try_chat_utterance",
+          "file": "app/nlu/fast_path.py",
+          "note": "恒 return None，身份/陪聊走 StructuredNLU"
+        },
+        {
+          "function": "try_preference_utterance",
+          "file": "app/nlu/fast_path.py",
+          "note": "恒 return None，记忆改由 LLM profile_update"
+        }
+      ]
+    },
+    {
+      "id": "14_helper_heuristics",
+      "name": "辅助启发式（不直接走快路径路由）",
+      "status": "auxiliary",
+      "items": [
+        {
+          "function": "looks_like_vehicle_knowledge",
+          "file": "app/nlu/fast_path.py",
+          "purpose": "排斥网页快搜/闲聊补搜误入手册；不再用于 try_knowledge_utterance 路由",
+          "vehicle_terms_regex_summary": "充电|泊车|哨兵|玩具箱|灯光秀|后备箱|车窗|天窗|座椅|摄像头|前撞|预警|Model SXY3|车辆|手册|雨刮|胎压|电池图标|…",
+          "howto": "怎么|如何|怎样|咋|怎么办|…",
+          "why": "为什么|为啥|为何",
+          "what": "什么意思|代表着什么|…",
+          "trouble": "无法|不能|充不了|故障|报警|…",
+          "positive_rules": [
+            "无法充电|充不了电|…",
+            "trouble + (vehicle|howto|怎么办)",
+            "howto + vehicle",
+            "why + vehicle",
+            "what + vehicle",
+            "howto + 清洁|操作|… + 车|摄像头|…"
+          ],
+          "negative_rules": [
+            "looks_like_smalltalk",
+            "附近+充电站/美食…",
+            "现在多少度/音量/在听…",
+            "^(打开|关闭|…|导航到) 且无 howto/trouble"
+          ]
+        },
+        {
+          "function": "looks_like_smalltalk",
+          "file": "app/nlu/fast_path.py",
+          "purpose": "coerce_planned_intent 把误标 knowledge 纠回 chat",
+          "patterns_summary": "你是谁|介绍一下你自己|你好谢谢再见|心情烦躁孤独吐槽讲笑话"
+        },
+        {
+          "function": "looks_like_entertainment_chat",
+          "file": "app/nlu/fast_path.py",
+          "purpose": "歌曲故事/电影八卦，coerce 时不当 handbook",
+          "patterns_summary": "这首歌|歌词|创作背景|电影|八卦|明星|讲个故事|笑话"
+        },
+        {
+          "function": "coerce_planned_intent",
+          "file": "app/nlu/fast_path.py",
+          "purpose": "StructuredNLU 规划后纠偏",
+          "rules": [
+            "smalltalk/entertainment + intent=knowledge → chat",
+            "intent=chat + reason_wants_knowledge(reason) → knowledge（信 LLM reason，不用 query 正则）"
+          ],
+          "reason_wants_knowledge_pos": "应调用 knowledge|查手册|手册问法|车主手册|…",
+          "reason_wants_knowledge_neg": "禁止 knowledge|符合 chat|属于寒暄|…"
+        }
+      ]
+    },
+    {
+      "id": "15_post_llm_planner_guards",
+      "name": "StructuredNLU 规划后硬门禁",
+      "file": "app/nlu/planner.py",
+      "status": "post_llm",
+      "rules": [
+        {
+          "function": "sanitize_tool_calls",
+          "actions": [
+            "navigation.navigate_to: strip_compound_tail + 剔除 is_relative_or_category_destination",
+            "apps.launch 地图类: 仅当 _user_asked_open_map_app(query) 为 true，否则剔除高德/地图/amap/腾讯地图/百度"
+          ],
+          "map_app_names": ["高德地图", "高德", "amap", "地图", "车载地图", "腾讯地图", "百度"],
+          "user_asked_map_pattern": "(打开|开启|启动|关掉|关闭).{0,8}(高德|地图|amap|腾讯地图|百度地图)",
+          "exclude_open_nav_only": "「打开导航去X」不算打开地图 App"
+        },
+        {
+          "function": "recover_nearby_from_relative_nav",
+          "condition": "相对导航被 sanitize 剥光且无其它工具",
+          "category_keywords_map": [
+            ["商场|购物中心", "商场"],
+            ["充电站|超充|充电桩", "充电站"],
+            ["加油站", "加油站"],
+            ["停车场|车位", "停车场"],
+            ["咖啡", "咖啡"],
+            ["美食|餐厅|饭店|吃饭", "美食"],
+            ["厕所|卫生间", "公共厕所"],
+            ["超市|便利店", "超市"]
+          ],
+          "fallback_tool": { "name": "maps.search_nearby", "keywords": "生活服务", "radius": 5000 }
+        }
+      ]
+    }
+  ],
+  "review_checklist": [
+    "01 全局门禁：长度>10、多域复合句是否过宽/过窄？",
+    "02 确认/取消词表是否漏常用口语？",
+    "03 寒暄是否应也交给 LLM？",
+    "04 导航澄清：序号/全称/换题规则是否合理？",
+    "06 App 列表与别名是否完整？误开音乐/导航？",
+    "07 车况 SEARCH 是否与手册/闲聊冲突？",
+    "08 舱体直达：读消息/空调/天窗边界？",
+    "09 周边 keywords 映射是否准确？",
+    "10 网页搜与附近/手册排斥是否足够？",
+    "12 combo 硬编码是否应删除？",
+    "14 looks_like_vehicle_knowledge 是否还有必要保留？",
+    "15 sanitize 相对导航降级是否合理？"
+  ]
+}

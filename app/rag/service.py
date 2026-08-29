@@ -3,32 +3,78 @@
 from __future__ import annotations
 
 import threading
+import time
 from typing import Any, Dict, List, Optional, Tuple
+
+_RETRY_AFTER_SEC = 12.0
+_MAX_IMAGES_PER_DOC = 8
+
+
+def _resolve_image_path(path: str) -> str:
+    try:
+        from src.utils import convert_db_path_to_local
+
+        return convert_db_path_to_local(path) or path
+    except Exception:
+        return path
+
+
+def _card_images(meta: Dict[str, Any]) -> List[Dict[str, str]]:
+    """从手册片段 metadata 抽出可给前端展示的插图。"""
+    raw = meta.get("images_info") or meta.get("images") or []
+    if not isinstance(raw, list):
+        return []
+    out: List[Dict[str, str]] = []
+    seen = set()
+    for img in raw:
+        if not isinstance(img, dict):
+            continue
+        path = img.get("image_path") or img.get("relative_path") or ""
+        if not path:
+            continue
+        rel = _resolve_image_path(str(path))
+        if rel in seen:
+            continue
+        seen.add(rel)
+        title = str(img.get("title") or "").strip()
+        out.append({"title": title, "image_path": rel})
+        if len(out) >= _MAX_IMAGES_PER_DOC:
+            break
+    return out
 
 
 class RagService:
     def __init__(self):
         self._engine = None
         self._error: Optional[str] = None
+        self._error_ts: float = 0.0
         self._lock = threading.Lock()
         self._warmed = False
 
     def _ensure(self):
-        if self._engine is not None or self._error:
+        if self._engine is not None:
+            return
+        if self._error and (time.time() - self._error_ts) < _RETRY_AFTER_SEC:
             return
         with self._lock:
-            if self._engine is not None or self._error:
+            if self._engine is not None:
+                return
+            if self._error and (time.time() - self._error_ts) < _RETRY_AFTER_SEC:
                 return
             try:
                 print("[RAG] 正在加载知识库引擎(BM25+Milvus+Reranker)，请稍候...")
                 from context.rag_engine import RAGEngine
 
                 self._engine = RAGEngine()
+                self._error = None
+                self._error_ts = 0.0
                 print("[RAG] 引擎加载完成")
             except Exception as e:
                 self._error = str(e)
+                self._error_ts = time.time()
                 self._engine = None
                 print(f"[RAG] 引擎加载失败: {e}")
+                print("[RAG] 常见原因：同时开了多个 python run.py，milvus.db 只能被一个进程打开。请只留一个后端。")
 
     @property
     def available(self) -> bool:
@@ -88,6 +134,7 @@ class RagService:
                     "page": page,
                     "content": content,
                     "preview": preview + ("…" if len(preview) >= 140 else ""),
+                    "images": _card_images(meta),
                 }
             )
         return context_str, cards

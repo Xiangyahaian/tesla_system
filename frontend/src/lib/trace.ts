@@ -1,4 +1,5 @@
 import type { TraceStep } from "@/lib/types";
+import { collectDocImages, normalizeContexts, type RetrievedDoc, type RetrievedImage } from "@/lib/answer";
 
 /** 能体现 Agent 能力的步骤（剔除会话/循环/装配等基建噪声） */
 const SHOWCASE_TYPES = new Set([
@@ -9,6 +10,7 @@ const SHOWCASE_TYPES = new Set([
   "search",
   "knowledge",
   "response",
+  "memory",
   "error",
 ]);
 
@@ -30,6 +32,7 @@ const TYPE_LABEL: Record<string, string> = {
   search: "读取车况",
   knowledge: "检索手册",
   response: "生成回复",
+  memory: "更新画像",
   error: "异常",
 };
 
@@ -59,6 +62,7 @@ const TOOL_CN: Record<string, string> = {
   "media.switch_radio": "切换电台",
   "media.set_volume": "音量",
   "maps.search_nearby": "搜索周边",
+  "web.search": "网页搜索",
   "navigation.navigate_to": "开始导航",
   "navigation.start": "开始导航",
   "navigation.stop": "结束导航",
@@ -92,6 +96,8 @@ const ARG_CN: Record<string, string> = {
   artist: "歌手",
   title: "曲目",
   destination: "目的地",
+  query: "关键词",
+  count: "条数",
   recirculation: "循环",
   locked: "锁定",
   open: "开启",
@@ -110,9 +116,21 @@ export type ShowcaseStep = {
   title: string;
   summary?: string;
   detailLines?: string[];
+  docs?: RetrievedDoc[];
+  images?: RetrievedImage[];
   status?: string;
   index: number;
+  ts?: number;
+  elapsedMs?: number;
 };
+
+export function formatElapsed(ms?: number | null) {
+  if (ms == null || !Number.isFinite(ms) || ms < 0) return "";
+  if (ms < 1000) return `${Math.round(ms)} ms`;
+  const s = ms / 1000;
+  if (s < 10) return `${s.toFixed(1)} s`;
+  return `${Math.round(s)} s`;
+}
 
 function toolLabel(name: string): string {
   return TOOL_CN[name] || name.replace(/\./g, " · ");
@@ -158,7 +176,7 @@ function statusOf(s: TraceStep): string {
 }
 
 /** 过滤并润色轨迹，只保留给人扫读的能力步骤 */
-export function toShowcaseSteps(steps: TraceStep[]): ShowcaseStep[] {
+export function toShowcaseSteps(steps: TraceStep[], endedAt?: number): ShowcaseStep[] {
   const out: ShowcaseStep[] = [];
   let knowledgeMerged = false;
 
@@ -262,24 +280,43 @@ export function toShowcaseSteps(steps: TraceStep[]): ShowcaseStep[] {
     }
 
     if (s.type === "knowledge") {
-      const docCount = detail.doc_count != null ? Number(detail.doc_count) : null;
-      // 合并「检索手册」+「命中 n 篇」为一步
       if (!knowledgeMerged) {
         knowledgeMerged = true;
-        const later = steps.find(
-          (x) => x.type === "knowledge" && (x.detail as Record<string, unknown>)?.doc_count != null,
-        );
-        const n =
-          docCount ??
-          (later ? Number((later.detail as Record<string, unknown>).doc_count) : null);
+        const later = steps.find((x) => {
+          if (x.type !== "knowledge") return false;
+          const d = (x.detail || {}) as Record<string, unknown>;
+          return d.doc_count != null || !!d.error || (x.status || "") === "error";
+        });
+        const laterDetail = ((later?.detail || {}) as Record<string, unknown>) || {};
+        const err = String(laterDetail.error || detail.error || "");
+        const failed = (later?.status || s.status || "") === "error" || !!err;
+        const nRaw = laterDetail.doc_count ?? detail.doc_count;
+        const n = nRaw != null ? Number(nRaw) : null;
+        const docs = normalizeContexts(laterDetail.docs ?? detail.docs);
+        const images = collectDocImages(docs);
+        const imgN = images.length;
         out.push({
-          id: s.id,
+          id: (later || s).id,
           type: s.type,
           typeLabel: TYPE_LABEL.knowledge,
-          title: n != null ? `命中 ${n} 篇手册` : "检索用户手册",
-          summary: n != null ? "已从知识库取回相关原文" : "正在检索手册",
-          detailLines: n != null ? [`检索结果：${n} 篇`] : undefined,
-          status: statusOf(s),
+          title: failed ? "检索手册失败" : n != null && n > 0 ? `命中 ${n} 篇手册` : "未命中手册",
+          summary: failed
+            ? "知识库连不上，没有取到原文"
+            : n != null && n > 0
+              ? imgN > 0
+                ? `已取回原文，含 ${imgN} 张插图`
+                : "已从知识库取回相关原文"
+              : "手册里没有贴合的片段",
+          detailLines: failed
+            ? [err ? `报错：${err}` : "知识库不可用"].filter(Boolean)
+            : docs.length
+              ? undefined
+              : n != null
+                ? [`检索结果：${n} 篇`]
+                : undefined,
+          docs: docs.length ? docs : undefined,
+          images: imgN ? images : undefined,
+          status: failed ? "error" : statusOf(later || s),
           index: 0,
         });
       }
@@ -288,14 +325,44 @@ export function toShowcaseSteps(steps: TraceStep[]): ShowcaseStep[] {
 
     if (s.type === "search") {
       const seat = detail.active_seat_cn || detail.active_seat;
+      const err = detail.error != null ? String(detail.error) : "";
+      const failed = (s.status || "") === "error" || !!err;
       out.push({
         id: s.id,
         type: s.type,
         typeLabel: TYPE_LABEL.search,
-        title: "读取实时车况",
-        summary: seat ? `围绕 ${SEAT_CN[String(seat)] || seat} 座位` : "读取车辆状态快照",
-        detailLines: seat ? [`当前座位：${SEAT_CN[String(seat)] || seat}`] : undefined,
-        status: statusOf(s),
+        title: failed ? s.title || "读取车况失败" : "读取实时车况",
+        summary: failed
+          ? "口语生成失败，已改走车况兜底"
+          : seat
+            ? `围绕 ${SEAT_CN[String(seat)] || seat} 座位`
+            : "读取车辆状态快照",
+        detailLines: [
+          seat ? `当前座位：${SEAT_CN[String(seat)] || seat}` : "",
+          err ? `报错：${err}` : "",
+        ].filter(Boolean),
+        status: failed ? "error" : statusOf(s),
+        index: 0,
+      });
+      continue;
+    }
+
+    if (s.type === "error") {
+      const err = detail.error != null ? String(detail.error) : "";
+      const kind = detail.kind != null ? String(detail.kind) : "";
+      const mode = detail.llm_mode != null ? String(detail.llm_mode) : "";
+      out.push({
+        id: s.id,
+        type: s.type,
+        typeLabel: TYPE_LABEL.error,
+        title: s.title || "调用失败",
+        summary: kind ? `原因类型：${kind}` : "见报错详情",
+        detailLines: [
+          kind ? `类型：${kind}` : "",
+          mode ? `模型：${mode === "local" ? "本地" : "云端"}` : "",
+          err ? `报错：${err}` : "",
+        ].filter(Boolean),
+        status: "error",
         index: 0,
       });
       continue;
@@ -347,6 +414,26 @@ export function toShowcaseSteps(steps: TraceStep[]): ShowcaseStep[] {
       continue;
     }
 
+    if (s.type === "memory") {
+      const bits = [
+        detail.memories_updated ? "记忆" : "",
+        detail.persona_updated ? "人设" : "",
+        detail.preferences_updated ? "偏好" : "",
+      ].filter(Boolean);
+      const notes = Array.isArray(detail.notes) ? detail.notes.map(String) : [];
+      out.push({
+        id: s.id,
+        type: s.type,
+        typeLabel: TYPE_LABEL.memory,
+        title: s.title || "更新记忆/人设/偏好",
+        summary: bits.length ? `已更新：${bits.join("、")}` : undefined,
+        detailLines: notes.length ? notes.map(String) : undefined,
+        status: statusOf(s),
+        index: 0,
+      });
+      continue;
+    }
+
     out.push({
       id: s.id,
       type: s.type,
@@ -357,7 +444,17 @@ export function toShowcaseSteps(steps: TraceStep[]): ShowcaseStep[] {
     });
   }
 
-  return out.map((step, i) => ({ ...step, index: i + 1 }));
+  const tsById = new Map(steps.map((s) => [s.id, s.ts]));
+  return out.map((step, i) => {
+    const ts = tsById.get(step.id);
+    const nextId = out[i + 1]?.id;
+    const nextTs = (nextId ? tsById.get(nextId) : undefined) ?? endedAt;
+    let elapsedMs: number | undefined;
+    if (ts && nextTs && nextTs >= ts) {
+      elapsedMs = Math.max(0, Math.round((nextTs - ts) * 1000));
+    }
+    return { ...step, index: i + 1, ts, elapsedMs };
+  });
 }
 
 export function intentLabel(intent?: string): string {

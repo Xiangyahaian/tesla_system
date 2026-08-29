@@ -5,7 +5,9 @@ import { useVehicleControl } from "@/hooks/useVehicleControl";
 import type { CabinStateSnapshot, SeatNode } from "@/lib/types";
 import { SEAT_LABELS, type SeatId } from "@/lib/seats";
 import { AmapNavPanel } from "@/components/maps/AmapNavPanel";
+import { fetchWeather, type WeatherPayload } from "@/lib/api";
 
+const WEATHER_POLL_MS = 10 * 60 * 1000;
 const MODE_CN: Record<string, string> = {
   auto: "自动",
   eco: "节能",
@@ -33,9 +35,22 @@ const DOOR_KEY: Partial<Record<SeatId, string>> = {
   rear_right: "rear_right",
 };
 
+type ControlOpts = { confirmHigh?: boolean; label?: string; live?: boolean };
+type ControlFn = (tool: string, args?: Record<string, unknown>, opts?: ControlOpts) => void;
+
 function cnMode(v?: string | null) {
   if (!v) return "—";
   return MODE_CN[v] || v;
+}
+
+function sliderRatio(el: HTMLElement | null, clientX: number) {
+  if (!el) return 0;
+  const rect = el.getBoundingClientRect();
+  return Math.max(0, Math.min(1, (clientX - rect.left) / Math.max(rect.width, 1)));
+}
+
+function clamp01(n: number) {
+  return Math.max(0, Math.min(1, n));
 }
 
 function useAnimatedNumber(value: number, precision = 0) {
@@ -53,30 +68,6 @@ function useAnimatedNumber(value: number, precision = 0) {
   return text;
 }
 
-/** 低通显示值：避免 4Hz 车速把文案刷成跳字 */
-function useSmoothedNumber(value: number, tauMs = 420) {
-  const [shown, setShown] = useState(value);
-  const shownRef = useRef(value);
-  const targetRef = useRef(value);
-  targetRef.current = value;
-  useEffect(() => {
-    let raf = 0;
-    let last = performance.now();
-    const step = (now: number) => {
-      const dt = Math.min(0.08, Math.max(0, (now - last) / 1000));
-      last = now;
-      const alpha = 1 - Math.exp(-(dt * 1000) / tauMs);
-      shownRef.current += (targetRef.current - shownRef.current) * alpha;
-      const next = shownRef.current;
-      setShown((prev) => (Math.abs(prev - next) < 0.05 ? prev : next));
-      raf = requestAnimationFrame(step);
-    };
-    raf = requestAnimationFrame(step);
-    return () => cancelAnimationFrame(raf);
-  }, [tauMs]);
-  return shown;
-}
-
 function useGaugeProgress(value: number, max: number) {
   const pct = Math.max(0, Math.min(1, max <= 0 ? 0 : value / max));
   const spring = useSpring(pct, { stiffness: 88, damping: 20, mass: 0.7 });
@@ -88,7 +79,7 @@ function useGaugeProgress(value: number, max: number) {
   return p;
 }
 
-/** 真实车机表盘（浅色）：铝质表圈 + 密刻度/数字 + 锥形指针 + 色带分区 */
+/** 精致环轨表：细轨 + 进度弧，去掉厚重表圈/螺丝/假指针 */
 function PremiumGauge({
   progress,
   label,
@@ -96,8 +87,6 @@ function PremiumGauge({
   unit,
   tone = "speed",
   maxValue = 160,
-  majorStep = 20,
-  minorStep = 5,
 }: {
   progress: number;
   label: string;
@@ -108,253 +97,95 @@ function PremiumGauge({
   majorStep?: number;
   minorStep?: number;
 }) {
-  const size = 200;
-  const cx = 100;
-  const cy = 104;
+  const size = 168;
+  const cx = 84;
+  const cy = 88;
   const startDeg = -210;
   const sweep = 240;
   const p = Math.max(0, Math.min(1, progress));
-  const needleDeg = startDeg + sweep * p;
-  const uid = `g-${tone}`;
+  const uid = `halo-${tone}`;
   const isPower = tone === "power";
-  const rOuter = 78;
-  const rTickOuter = 70;
-  const rLabel = 52;
-  const rTrack = 66;
+  const r = 62;
+  const tipDeg = startDeg + sweep * p;
+  const tipRad = (tipDeg * Math.PI) / 180;
+  const tipX = cx + Math.cos(tipRad) * r;
+  const tipY = cy + Math.sin(tipRad) * r;
 
-  const ticks = useMemo(() => {
-    const items: {
-      key: string;
-      kind: "minor" | "mid" | "major";
-      x1: number;
-      y1: number;
-      x2: number;
-      y2: number;
-      label?: string;
-      lx?: number;
-      ly?: number;
-    }[] = [];
-    for (let v = 0; v <= maxValue + 0.001; v += minorStep) {
-      const t = v / maxValue;
-      const a = ((startDeg + sweep * t) * Math.PI) / 180;
-      const major = Math.abs(v % majorStep) < 0.001;
-      const mid = !major && Math.abs(v % (majorStep / 2)) < 0.001;
-      const len = major ? 12 : mid ? 8 : 5;
-      const x1 = cx + Math.cos(a) * rTickOuter;
-      const y1 = cy + Math.sin(a) * rTickOuter;
-      const x2 = cx + Math.cos(a) * (rTickOuter - len);
-      const y2 = cy + Math.sin(a) * (rTickOuter - len);
-      const item: (typeof items)[number] = {
-        key: `${v}`,
-        kind: major ? "major" : mid ? "mid" : "minor",
-        x1,
-        y1,
-        x2,
-        y2,
-      };
-      if (major) {
-        item.label = String(Math.round(v));
-        item.lx = cx + Math.cos(a) * rLabel;
-        item.ly = cy + Math.sin(a) * rLabel;
-      }
-      items.push(item);
-    }
-    return items;
-  }, [maxValue, majorStep, minorStep]);
-
-  const zoneArc = (from: number, to: number) => {
+  const arc = (from: number, to: number) => {
     const a0 = ((startDeg + sweep * from) * Math.PI) / 180;
     const a1 = ((startDeg + sweep * to) * Math.PI) / 180;
-    const x0 = cx + Math.cos(a0) * rTrack;
-    const y0 = cy + Math.sin(a0) * rTrack;
-    const x1 = cx + Math.cos(a1) * rTrack;
-    const y1 = cy + Math.sin(a1) * rTrack;
+    const x0 = cx + Math.cos(a0) * r;
+    const y0 = cy + Math.sin(a0) * r;
+    const x1 = cx + Math.cos(a1) * r;
+    const y1 = cy + Math.sin(a1) * r;
     const large = sweep * (to - from) > 180 ? 1 : 0;
-    return `M ${x0} ${y0} A ${rTrack} ${rTrack} 0 ${large} 1 ${x1} ${y1}`;
+    return `M ${x0} ${y0} A ${r} ${r} 0 ${large} 1 ${x1} ${y1}`;
   };
 
-  // 指针多边形（锥形，朝右为 0°，再整体旋转）
-  const needleLen = 58;
-  const needle = `${cx + 8},${cy - 2.2} ${cx + needleLen},${cy} ${cx + 8},${cy + 2.2} ${cx + 4},${cy}`;
+  const majors = useMemo(() => {
+    const out: { v: number; x: number; y: number }[] = [];
+    const step = isPower ? 25 : 40;
+    for (let v = 0; v <= maxValue + 0.01; v += step) {
+      const t = Math.min(1, v / maxValue);
+      const a = ((startDeg + sweep * t) * Math.PI) / 180;
+      out.push({
+        v: Math.round(v),
+        x: cx + Math.cos(a) * (r - 14),
+        y: cy + Math.sin(a) * (r - 14),
+      });
+    }
+    return out;
+  }, [isPower, maxValue]);
 
   return (
     <div className={`premium-gauge tone-${tone}`}>
       <div className="premium-gauge-frame">
         <svg viewBox={`0 0 ${size} ${size}`} className="premium-gauge-svg" aria-hidden>
           <defs>
-            <linearGradient id={`${uid}-bezel`} x1="15%" y1="10%" x2="85%" y2="90%">
-              <stop offset="0%" stopColor="#ffffff" />
-              <stop offset="28%" stopColor="#d8dbe2" />
-              <stop offset="55%" stopColor="#9aa0ac" />
-              <stop offset="78%" stopColor="#e8eaef" />
-              <stop offset="100%" stopColor="#7a808c" />
+            <linearGradient id={`${uid}-arc`} x1="0%" y1="0%" x2="100%" y2="0%">
+              <stop offset="0%" stopColor={isPower ? "#5a9b78" : "#6b7280"} />
+              <stop offset="100%" stopColor={isPower ? "#1f6b4a" : "#121316"} />
             </linearGradient>
-            <linearGradient id={`${uid}-bezel-inner`} x1="0%" y1="0%" x2="100%" y2="100%">
-              <stop offset="0%" stopColor="#eef0f4" />
-              <stop offset="50%" stopColor="#c5c9d2" />
-              <stop offset="100%" stopColor="#eceef3" />
-            </linearGradient>
-            <radialGradient id={`${uid}-face`} cx="42%" cy="35%" r="70%">
-              <stop offset="0%" stopColor="#ffffff" />
-              <stop offset="55%" stopColor="#f5f6f8" />
-              <stop offset="100%" stopColor="#e4e6eb" />
-            </radialGradient>
-            <radialGradient id={`${uid}-hub`} cx="40%" cy="35%" r="65%">
-              <stop offset="0%" stopColor="#4a4e58" />
-              <stop offset="55%" stopColor="#1a1c22" />
-              <stop offset="100%" stopColor="#0c0d10" />
-            </radialGradient>
-            <linearGradient id={`${uid}-needle`} x1="0%" y1="0%" x2="100%" y2="0%">
-              <stop offset="0%" stopColor="#3a3e48" />
-              <stop offset="70%" stopColor="#1a1c22" />
-              <stop offset="100%" stopColor={isPower ? "#2f6b4f" : "#b91c1c"} />
-            </linearGradient>
-            <filter id={`${uid}-inset`} x="-10%" y="-10%" width="120%" height="120%">
-              <feDropShadow dx="0" dy="2" stdDeviation="1.6" floodColor="rgba(18,19,22,0.12)" />
-            </filter>
-            <filter id={`${uid}-glow`} x="-40%" y="-40%" width="180%" height="180%">
-              <feGaussianBlur stdDeviation="1.2" result="b" />
-              <feMerge>
-                <feMergeNode in="b" />
-                <feMergeNode in="SourceGraphic" />
-              </feMerge>
-            </filter>
           </defs>
 
-          {/* 铝制外圈 */}
-          <circle cx={cx} cy={cy} r={rOuter + 8} fill={`url(#${uid}-bezel)`} />
-          <circle cx={cx} cy={cy} r={rOuter + 8} fill="none" stroke="rgba(255,255,255,0.7)" strokeWidth="1" />
-          <circle cx={cx} cy={cy} r={rOuter + 2} fill={`url(#${uid}-bezel-inner)`} />
-
-          {/* 定位螺丝（四象限） */}
-          {[ -45, 45, 135, -135 ].map((deg) => {
-            const a = (deg * Math.PI) / 180;
-            const sx = cx + Math.cos(a) * (rOuter + 5);
-            const sy = cy + Math.sin(a) * (rOuter + 5);
-            return (
-              <g key={deg}>
-                <circle cx={sx} cy={sy} r="2.4" fill="#d0d3da" stroke="#8b909a" strokeWidth="0.6" />
-                <line
-                  x1={sx - 1.4}
-                  y1={sy}
-                  x2={sx + 1.4}
-                  y2={sy}
-                  stroke="#6b707a"
-                  strokeWidth="0.5"
-                />
-              </g>
-            );
-          })}
-
-          {/* 浅色表盘 */}
-          <circle
-            cx={cx}
-            cy={cy}
-            r={rOuter - 2}
-            fill={`url(#${uid}-face)`}
-            filter={`url(#${uid}-inset)`}
-          />
-          <circle cx={cx} cy={cy} r={rOuter - 2} fill="none" stroke="rgba(26,28,34,0.08)" strokeWidth="1" />
-          <circle cx={cx} cy={cy} r={rOuter - 7} fill="none" stroke="rgba(26,28,34,0.06)" strokeWidth="0.8" />
-
-          {/* 底轨 */}
           <path
-            d={zoneArc(0, 1)}
+            d={arc(0, 1)}
             fill="none"
-            stroke="rgba(26,28,34,0.08)"
-            strokeWidth="5"
-            strokeLinecap="butt"
-          />
-
-          {/* 色带分区 */}
-          {isPower ? (
-            <>
-              <path d={zoneArc(0, 0.35)} fill="none" stroke="rgba(47,107,79,0.45)" strokeWidth="5" />
-              <path d={zoneArc(0.35, 0.75)} fill="none" stroke="rgba(26,28,34,0.12)" strokeWidth="5" />
-              <path d={zoneArc(0.75, 1)} fill="none" stroke="rgba(161,92,18,0.55)" strokeWidth="5" />
-            </>
-          ) : (
-            <>
-              <path d={zoneArc(0, 0.55)} fill="none" stroke="rgba(26,28,34,0.1)" strokeWidth="5" />
-              <path d={zoneArc(0.55, 0.82)} fill="none" stroke="rgba(26,28,34,0.18)" strokeWidth="5" />
-              <path d={zoneArc(0.82, 1)} fill="none" stroke="rgba(185,28,28,0.75)" strokeWidth="5" />
-            </>
-          )}
-
-          {/* 进度高亮弧（当前值） */}
-          <path
-            d={zoneArc(0, Math.max(0.001, p))}
-            fill="none"
-            stroke={isPower ? "rgba(47,107,79,0.85)" : "rgba(26,28,34,0.55)"}
-            strokeWidth="2.2"
+            stroke="rgba(18,19,22,0.08)"
+            strokeWidth="7"
             strokeLinecap="round"
-            filter={`url(#${uid}-glow)`}
+          />
+          <path
+            d={arc(0, Math.max(0.001, p))}
+            fill="none"
+            stroke={`url(#${uid}-arc)`}
+            strokeWidth="7"
+            strokeLinecap="round"
+          />
+          <circle
+            cx={tipX}
+            cy={tipY}
+            r="4.5"
+            fill="#fff"
+            stroke={isPower ? "#1f6b4a" : "#121316"}
+            strokeWidth="2"
           />
 
-          {/* 刻度与数字 */}
-          {ticks.map((t) => (
-            <g key={t.key}>
-              <line
-                x1={t.x1}
-                y1={t.y1}
-                x2={t.x2}
-                y2={t.y2}
-                stroke={
-                  t.kind === "major"
-                    ? "rgba(26,28,34,0.85)"
-                    : t.kind === "mid"
-                      ? "rgba(26,28,34,0.4)"
-                      : "rgba(26,28,34,0.18)"
-                }
-                strokeWidth={t.kind === "major" ? 1.6 : 1}
-                strokeLinecap="round"
-              />
-              {t.label != null && t.lx != null && t.ly != null ? (
-                <text
-                  x={t.lx}
-                  y={t.ly}
-                  textAnchor="middle"
-                  dominantBaseline="middle"
-                  fill="rgba(26,28,34,0.72)"
-                  fontSize="9.5"
-                  fontFamily="Rajdhani, sans-serif"
-                  fontWeight="700"
-                >
-                  {t.label}
-                </text>
-              ) : null}
-            </g>
+          {majors.map((m) => (
+            <text
+              key={m.v}
+              x={m.x}
+              y={m.y}
+              textAnchor="middle"
+              dominantBaseline="middle"
+              fill="rgba(18,19,22,0.38)"
+              fontSize="8"
+              fontFamily="Rajdhani, sans-serif"
+              fontWeight="650"
+            >
+              {m.v}
+            </text>
           ))}
-
-          {/* 品牌小字 */}
-          <text
-            x={cx}
-            y={cy + 28}
-            textAnchor="middle"
-            fill="rgba(26,28,34,0.28)"
-            fontSize="7"
-            fontFamily="Noto Sans SC, sans-serif"
-            letterSpacing="2"
-          >
-            {label.toUpperCase()}
-          </text>
-
-          {/* 锥形指针 */}
-          <g transform={`rotate(${needleDeg} ${cx} ${cy})`}>
-            <polygon points={needle} fill={`url(#${uid}-needle)`} opacity="0.95" />
-            <circle
-              cx={cx + needleLen}
-              cy={cy}
-              r="2.2"
-              fill={isPower ? "#2f6b4f" : "#b91c1c"}
-              filter={`url(#${uid}-glow)`}
-            />
-          </g>
-
-          {/* 中心轴毂 */}
-          <circle cx={cx} cy={cy} r="11" fill={`url(#${uid}-hub)`} stroke="rgba(26,28,34,0.2)" strokeWidth="1" />
-          <circle cx={cx} cy={cy} r="6.5" fill="#1a1c22" stroke="rgba(255,255,255,0.15)" strokeWidth="0.8" />
-          <circle cx={cx} cy={cy} r="2.4" fill={isPower ? "#2f6b4f" : "#b91c1c"} />
         </svg>
 
         <div className="premium-gauge-lcd">
@@ -376,15 +207,7 @@ function DriveCluster({
   battery,
   rangeKm,
   driveMode,
-  childLock,
-  laneKeep,
-  collisionWarning,
-  autopark,
-  doorsLocked,
-  chargePortOpen,
-  navMode,
-  navDestination,
-  navEta,
+  outsideTemp,
   onControl,
 }: {
   speed: number;
@@ -395,15 +218,7 @@ function DriveCluster({
   battery: number;
   rangeKm?: number;
   driveMode?: string;
-  childLock?: boolean;
-  laneKeep?: boolean;
-  collisionWarning?: boolean;
-  autopark?: boolean;
-  doorsLocked?: boolean;
-  chargePortOpen?: boolean;
-  navMode?: string | null;
-  navDestination?: string | null;
-  navEta?: number | null;
+  outsideTemp?: string | number | null;
   onControl: (tool: string, args?: Record<string, unknown>, opts?: { confirmHigh?: boolean; label?: string }) => void;
 }) {
   const speedText = useAnimatedNumber(speed);
@@ -418,7 +233,6 @@ function DriveCluster({
   const powerText = useAnimatedNumber(Math.abs(powerSigned), 0);
   const moving = speed > 1.2;
   const g = (gear || "P").toUpperCase();
-  const mode = (navMode || (parked || g === "P" ? "parked" : moving ? "cruising" : "parked")).toLowerCase();
   const battLow = battery < 20;
 
   const [now, setNow] = useState(() => new Date());
@@ -427,9 +241,8 @@ function DriveCluster({
     return () => window.clearInterval(id);
   }, []);
   const clock = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
-  // 室外温度：按时段给出演示值（真实车机来自车外传感器）
-  const hour = now.getHours();
-  const outsideC = hour < 6 ? 12 : hour < 11 ? 18 : hour < 17 ? 24 : hour < 21 ? 20 : 15;
+  const outsideLabel =
+    outsideTemp != null && String(outsideTemp).trim() !== "" ? `${String(outsideTemp).replace(/°/g, "")}°` : "—";
 
   // 行程累计（本会话）
   const tripRef = useRef({ km: 0, last: performance.now(), energyWh: 0 });
@@ -460,44 +273,24 @@ function DriveCluster({
   }, [speed, powerSigned]);
 
   const status =
-    mode === "parked" || parked || g === "P"
+    parked || g === "P"
       ? "驻车"
-      : mode === "navigating"
-        ? `导航${navEta != null ? ` ${navEta}分` : ""}`
-        : acc || moving
-          ? cruiseTarget != null
-            ? `巡航 · 设定 ${Math.round(Number(cruiseTarget) || 0)}`
-            : "巡航"
-          : "就绪";
+      : acc || moving
+        ? cruiseTarget != null
+          ? `巡航 · 设定 ${Math.round(Number(cruiseTarget) || 0)}`
+          : "巡航"
+        : "就绪";
 
   const gears = ["P", "R", "N", "D"] as const;
-  const telltales: { key: string; label: string; on: boolean; warn?: boolean }[] = [
-    { key: "acc", label: "ACC", on: !!acc },
-    { key: "lka", label: "LKA", on: !!laneKeep },
-    { key: "fcw", label: "FCW", on: !!collisionWarning },
-    { key: "lock", label: "LOCK", on: !!doorsLocked },
-    { key: "child", label: "CHILD", on: !!childLock },
-    { key: "park", label: "PARK", on: !!autopark },
-    { key: "batt", label: "BATT", on: battLow, warn: true },
-    { key: "chg", label: "CHG", on: !!chargePortOpen },
-  ];
 
   const powerBarPct = Math.max(4, Math.min(100, Math.abs(powerSigned)));
 
   return (
     <section
-      className={`drive-cluster${moving ? " moving" : ""}${acc ? " tone-cruise" : ""}${mode === "navigating" ? " tone-nav" : ""}`}
+      className={`drive-cluster${moving ? " moving" : ""}${acc ? " tone-cruise" : ""}`}
       aria-label="行驶仪表"
     >
       <div className="cluster-halo" aria-hidden />
-
-      <div className="cluster-meta">
-        <span className="cluster-clock">{clock}</span>
-        <span className="cluster-temp" title="车外温度">
-          车外 {outsideC}°
-        </span>
-        <span className="cluster-meta-gap" />
-      </div>
 
       <div className="cluster-toprow">
         <div className="cluster-gear">
@@ -543,36 +336,46 @@ function DriveCluster({
             ))}
           </div>
           <span className="phase-chip">{status}</span>
-          {mode === "navigating" && navDestination ? (
-            <span className="phase-chip dest-chip" title={navDestination}>
-              {navDestination.length > 8 ? `${navDestination.slice(0, 8)}…` : navDestination}
-            </span>
-          ) : null}
-        </div>
-        <button
-          type="button"
-          className="cluster-mode"
-          onClick={() => {
-            const modes = ["comfort", "sport", "eco", "standard"];
-            const cur = driveMode || "comfort";
-            const next = modes[(modes.indexOf(cur) + 1) % modes.length];
-            onControl("driving.set_mode", { mode: next }, { label: `驾驶模式 ${cnMode(next)}` });
-          }}
-        >
-          {cnMode(driveMode)}
-        </button>
-      </div>
-
-      <div className="cluster-telltales" aria-label="指示灯">
-        {telltales.map((t) => (
-          <span
-            key={t.key}
-            className={`telltale${t.on ? " on" : ""}${t.on && t.warn ? " warn" : ""}`}
-            title={t.label}
+          <button
+            type="button"
+            className={`telltale cluster-acc${acc ? " on" : ""}`}
+            aria-pressed={!!acc}
+            title={acc ? "关闭自适应巡航" : "开启自适应巡航"}
+            onClick={() => {
+              const enabling = !acc;
+              onControl(
+                "driving.set_adas",
+                { feature: "acc", enable: enabling },
+                {
+                  confirmHigh: true,
+                  label: enabling
+                    ? "确认开启自适应巡航？车辆将挂入 D 挡，按设定车速跟驰（路况起伏，不会匀速钉死）。"
+                    : "确认关闭自适应巡航？车辆将不再自动跟速。",
+                },
+              );
+            }}
           >
-            {t.label}
-          </span>
-        ))}
+            自动巡航
+          </button>
+        </div>
+        <div className="cluster-meta-inline" aria-label="时刻与驾驶状态">
+          <time dateTime={clock}>{clock}</time>
+          <i aria-hidden />
+          <span title="车外实况温度（与系统天气同源）">{outsideLabel}</span>
+          <i aria-hidden />
+          <button
+            type="button"
+            className="cluster-mode-btn"
+            onClick={() => {
+              const modes = ["comfort", "sport", "eco", "standard"];
+              const cur = driveMode || "comfort";
+              const next = modes[(modes.indexOf(cur) + 1) % modes.length];
+              onControl("driving.set_mode", { mode: next }, { label: `驾驶模式 ${cnMode(next)}` });
+            }}
+          >
+            {cnMode(driveMode)}
+          </button>
+        </div>
       </div>
 
       <div className="cluster-stage">
@@ -583,12 +386,10 @@ function DriveCluster({
           unit="km/h"
           tone="speed"
           maxValue={160}
-          majorStep={20}
-          minorStep={5}
         />
 
         <div className="cluster-hero">
-          <div className="hero-eyebrow">SPEED</div>
+          <div className="hero-eyebrow">{acc ? "ADAPTIVE CRUISE" : moving ? "DRIVING" : "READY"}</div>
           <div className="hero-speed">
             <strong>{speedText}</strong>
             <span>km/h</span>
@@ -597,14 +398,9 @@ function DriveCluster({
             <div className="hero-limit" title="巡航设定车速">
               SET <b>{Math.round(Number(cruiseTarget) || 0)}</b>
             </div>
-          ) : null}
-          <div className="hero-road" aria-hidden>
-            <motion.i
-              animate={moving ? { x: ["0%", "-50%"] } : { x: "0%" }}
-              transition={moving ? { duration: Math.max(0.8, 2.2 - speed / 80), repeat: Infinity, ease: "linear" } : {}}
-            />
-          </div>
-          <div className="hero-accel">{acc ? "自适应巡航中" : moving ? "手动行驶" : "静止"}</div>
+          ) : (
+            <div className="hero-accel">{acc ? "自适应巡航" : moving ? "手动行驶" : "静止待命"}</div>
+          )}
         </div>
 
         <PremiumGauge
@@ -614,8 +410,6 @@ function DriveCluster({
           unit="%"
           tone="power"
           maxValue={100}
-          majorStep={20}
-          minorStep={5}
         />
       </div>
 
@@ -772,13 +566,20 @@ function MediaDeck({
     station_name: string;
     category?: string | null;
   }[];
-  onControl: (tool: string, args?: Record<string, unknown>, opts?: { confirmHigh?: boolean; label?: string }) => void;
+  onControl: ControlFn;
 }) {
-  const volText = useAnimatedNumber(volume, 0);
   const [dragging, setDragging] = useState(false);
+  const draggingRef = useRef(false);
   const [dragRatio, setDragRatio] = useState(0);
   const trackRef = useRef<HTMLDivElement>(null);
+  const seekHoldUntil = useRef(0);
+  const volTrackRef = useRef<HTMLDivElement>(null);
+  const [volDragging, setVolDragging] = useState(false);
+  const volDraggingRef = useRef(false);
+  const [localVol, setLocalVol] = useState(volume);
+  const volHoldUntil = useRef(0);
   const [source, setSource] = useState<"music" | "radio">(radioPlaying ? "radio" : "music");
+  const volText = useAnimatedNumber(localVol, 0);
 
   useEffect(() => {
     if (radioPlaying) setSource("radio");
@@ -801,14 +602,23 @@ function MediaDeck({
   const [smoothPos, setSmoothPos] = useState(positionSec);
 
   useEffect(() => {
-    baseRef.current = {
-      pos: positionSec,
-      at: performance.now(),
-      playing,
-      title,
-    };
-    if (!dragging) setSmoothPos(positionSec);
-  }, [positionSec, playing, title, dragging]);
+    if (volDraggingRef.current) return;
+    if (performance.now() < volHoldUntil.current) return;
+    setLocalVol(volume);
+  }, [volume]);
+
+  useEffect(() => {
+    baseRef.current.playing = playing;
+    baseRef.current.title = title;
+    if (draggingRef.current) return;
+    if (performance.now() < seekHoldUntil.current) {
+      if (Math.abs(positionSec - baseRef.current.pos) < 1.25) seekHoldUntil.current = 0;
+      else return;
+    }
+    baseRef.current.pos = positionSec;
+    baseRef.current.at = performance.now();
+    setSmoothPos(positionSec);
+  }, [positionSec, playing, title]);
 
   useEffect(() => {
     if (!playing || dragging || isRadio) return;
@@ -826,24 +636,30 @@ function MediaDeck({
   }, [playing, dragging, durationSec, title, isRadio]);
 
   const displayPos = dragging ? dragRatio * Math.max(durationSec, 1) : smoothPos;
-  const ratio = durationSec > 0 ? Math.max(0, Math.min(1, displayPos / durationSec)) : 0;
+  const ratio = durationSec > 0 ? clamp01(displayPos / durationSec) : 0;
+  const volPct = Math.max(0, Math.min(100, localVol));
 
   const seekFromClientX = (clientX: number) => {
-    const el = trackRef.current;
-    if (!el || durationSec <= 0) return;
-    const rect = el.getBoundingClientRect();
-    const r = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+    if (durationSec <= 0) return;
+    const r = sliderRatio(trackRef.current, clientX);
     setDragRatio(r);
     return r;
   };
 
   const commitSeek = (r: number) => {
     if (durationSec <= 0) return;
-    onControl(
-      "media.seek_music",
-      { position_sec: Math.round(r * durationSec * 10) / 10 },
-      { label: "调整播放进度" },
-    );
+    const pos = Math.round(r * durationSec * 10) / 10;
+    seekHoldUntil.current = performance.now() + 480;
+    setSmoothPos(pos);
+    baseRef.current = { pos, at: performance.now(), playing, title };
+    onControl("media.seek_music", { position_sec: pos }, { label: "调整播放进度", live: true });
+  };
+
+  const applyVolume = (next: number, live = true) => {
+    const vol = Math.max(0, Math.min(100, next));
+    volHoldUntil.current = performance.now() + 420;
+    setLocalVol(vol);
+    onControl("media.set_volume", { volume: Math.round(vol), muted: false }, { live });
   };
 
   const onPlayPause = () => {
@@ -881,10 +697,8 @@ function MediaDeck({
   const eqHeights = useMemo(() => [0.35, 0.7, 0.45, 0.9, 0.55, 0.8, 0.4, 0.65], []);
 
   return (
-    <motion.article
+    <article
       className={`deck-music${live ? " live" : ""}${isRadio ? " radio" : ""}`}
-      layout
-      transition={{ duration: 0.35, ease: [0.22, 1, 0.36, 1] }}
     >
       <div className="media-source-tabs" role="tablist" aria-label="媒体来源">
         <button
@@ -1006,20 +820,25 @@ function MediaDeck({
                 onPointerDown={(e) => {
                   if (durationSec <= 0) return;
                   e.currentTarget.setPointerCapture(e.pointerId);
+                  draggingRef.current = true;
                   setDragging(true);
                   seekFromClientX(e.clientX);
                 }}
                 onPointerMove={(e) => {
-                  if (!dragging) return;
+                  if (!draggingRef.current) return;
                   seekFromClientX(e.clientX);
                 }}
                 onPointerUp={(e) => {
-                  if (!dragging) return;
+                  if (!draggingRef.current) return;
                   const r = seekFromClientX(e.clientX) ?? dragRatio;
+                  draggingRef.current = false;
                   setDragging(false);
                   commitSeek(r);
                 }}
-                onPointerCancel={() => setDragging(false)}
+                onPointerCancel={() => {
+                  draggingRef.current = false;
+                  setDragging(false);
+                }}
                 onKeyDown={(e) => {
                   if (durationSec <= 0) return;
                   if (e.key === "ArrowRight") {
@@ -1031,13 +850,8 @@ function MediaDeck({
                   }
                 }}
               >
-                <motion.i
-                  initial={false}
-                  animate={{ width: `${ratio * 100}%` }}
-                  transition={
-                    dragging ? { duration: 0 } : { type: "tween", duration: 0.12, ease: "linear" }
-                  }
-                />
+                <i style={{ width: `${ratio * 100}%` }} />
+                <em className="media-progress-thumb" style={{ left: `${ratio * 100}%` }} />
               </div>
               <div className="media-time-row">
                 <span>{formatClock(displayPos)}</span>
@@ -1095,35 +909,59 @@ function MediaDeck({
               type="button"
               className="media-vol-btn"
               aria-label="音量减"
-              onClick={() => onControl("media.set_volume", { delta: -5 })}
+              onClick={() => applyVolume(localVol - 5)}
             >
               −
             </button>
-            <button
-              type="button"
-              className="media-vol-track"
-              aria-label={`音量 ${volume}`}
-              onClick={(e) => {
-                const rect = e.currentTarget.getBoundingClientRect();
-                const volRatio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-                onControl("media.set_volume", { volume: Math.round(volRatio * 100) });
+            <div
+              ref={volTrackRef}
+              className={`media-vol-track${volDragging ? " dragging" : ""}`}
+              role="slider"
+              tabIndex={0}
+              aria-label="音量"
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={Math.round(volPct)}
+              onPointerDown={(e) => {
+                e.currentTarget.setPointerCapture(e.pointerId);
+                volDraggingRef.current = true;
+                setVolDragging(true);
+                applyVolume(sliderRatio(volTrackRef.current, e.clientX) * 100);
+              }}
+              onPointerMove={(e) => {
+                if (!volDraggingRef.current) return;
+                applyVolume(sliderRatio(volTrackRef.current, e.clientX) * 100);
+              }}
+              onPointerUp={() => {
+                volDraggingRef.current = false;
+                setVolDragging(false);
+              }}
+              onPointerCancel={() => {
+                volDraggingRef.current = false;
+                setVolDragging(false);
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "ArrowRight" || e.key === "ArrowUp") {
+                  e.preventDefault();
+                  applyVolume(localVol + 5);
+                } else if (e.key === "ArrowLeft" || e.key === "ArrowDown") {
+                  e.preventDefault();
+                  applyVolume(localVol - 5);
+                }
               }}
             >
-              <motion.i
-                initial={false}
-                animate={{ width: `${muted ? 0 : Math.max(0, Math.min(100, volume))}%` }}
-                transition={{ type: "spring", stiffness: 120, damping: 22 }}
-              />
-            </button>
+              <i style={{ width: `${volPct}%` }} />
+              <em className="media-vol-thumb" style={{ left: `${volPct}%` }} />
+            </div>
             <button
               type="button"
               className="media-vol-btn"
               aria-label="音量加"
-              onClick={() => onControl("media.set_volume", { delta: 5 })}
+              onClick={() => applyVolume(localVol + 5)}
             >
               +
             </button>
-            <span className="media-vol-num">{muted ? "静音" : volText}</span>
+            <span className="media-vol-num">{muted && !volDragging ? "静音" : volText}</span>
           </div>
         </div>
       </div>
@@ -1227,194 +1065,7 @@ function MediaDeck({
               })}
         </ul>
       </div>
-    </motion.article>
-  );
-}
-
-function DriveAssistStrip({
-  adas,
-  speed,
-  cruiseSet,
-  cruiseTarget,
-  parked,
-  gear,
-  busy,
-  pendingLabel,
-  navMode,
-  onControl,
-}: {
-  adas: Record<string, unknown>;
-  speed: number;
-  cruiseSet?: number | null;
-  cruiseTarget?: number | null;
-  parked?: boolean;
-  gear?: string;
-  busy?: boolean;
-  pendingLabel?: string | null;
-  navMode?: string | null;
-  onControl: (tool: string, args?: Record<string, unknown>, opts?: { confirmHigh?: boolean; label?: string }) => void;
-}) {
-  const inPark = !!parked || (gear || "P").toUpperCase() === "P";
-  const autoparkOn = !!adas.autopark;
-  const accOn = !!adas.acc;
-  const modeLabel =
-    navMode === "navigating" ? "导航中" : navMode === "parked" || inPark ? "驻车" : "行驶中";
-  // 文案用「设定车速」，不用跟驰波动目标，避免 53↔54 跳字
-  const setSpd = Number(cruiseSet ?? cruiseTarget ?? 65) || 65;
-  const smoothSpeed = useSmoothedNumber(speed, 480);
-  const speedLabel = Math.round(smoothSpeed);
-  const meterPct = accOn ? Math.max(6, Math.min(100, (smoothSpeed / Math.max(setSpd, 1)) * 100)) : 0;
-
-  type AssistItem = {
-    key: string;
-    code: string;
-    label: string;
-    feature: string;
-    on: boolean;
-    confirm?: boolean;
-    confirmLabel?: string;
-    confirmOffLabel?: string;
-    blocked?: string | null;
-  };
-
-  const items: AssistItem[] = [
-    {
-      key: "acc",
-      code: "ACC",
-      label: "自适应巡航",
-      feature: "acc",
-      on: accOn,
-      confirm: true,
-      confirmLabel: "确认开启自适应巡航？车辆将挂入 D 挡，按设定车速跟驰（路况起伏，不会匀速钉死）。",
-      confirmOffLabel: "确认关闭自适应巡航？车辆将不再自动跟速。",
-      blocked: autoparkOn ? "泊车中不可用" : null,
-    },
-    {
-      key: "lane_keep",
-      code: "LKA",
-      label: "车道保持",
-      feature: "lane_keep",
-      on: !!adas.lane_keep,
-      blocked: autoparkOn ? "泊车中不可用" : inPark ? "请先起步" : speed < 1 ? "行驶中可用" : null,
-    },
-    {
-      key: "autopark",
-      code: "APA",
-      label: "自动泊车",
-      feature: "autopark",
-      on: autoparkOn,
-      confirm: true,
-      confirmLabel:
-        "确认启动自动泊车？将退出巡航与导航跟车，车辆低速接管，请确认周围安全。",
-      confirmOffLabel: "确认退出自动泊车？",
-      blocked: speed > 8 ? "车速过高，请先减速" : null,
-    },
-    {
-      key: "auto_hold",
-      code: "AH",
-      label: "自动驻车",
-      feature: "auto_hold",
-      on: !!adas.auto_hold,
-      confirm: true,
-      confirmLabel: "确认开启自动驻车？停车时系统可能自动刹停。",
-      confirmOffLabel: "确认关闭自动驻车？",
-      blocked: autoparkOn ? "泊车中不可用" : inPark ? "已在 P 挡" : null,
-    },
-    {
-      key: "collision_warning",
-      code: "FCW",
-      label: "碰撞预警",
-      feature: "collision_warning",
-      on: !!adas.collision_warning,
-    },
-  ];
-
-  const activeCount = items.filter((i) => i.on).length;
-  const anyPending = !!busy && !!pendingLabel && items.some((i) => pendingLabel.includes(i.label));
-
-  return (
-    <section className="drive-assist" aria-label="行驶辅助">
-      <header className="drive-assist-head">
-        <div>
-          <em>行驶辅助</em>
-          <strong>
-            {modeLabel}
-            {accOn ? ` · ACC 设定 ${Math.round(setSpd)}` : ""}
-            {speed > 0.5 ? ` · ${speedLabel} km/h` : ""}
-          </strong>
-        </div>
-        <span className="assist-count">{activeCount}/5</span>
-      </header>
-      {anyPending ? <i className="acc-exec-pulse" aria-hidden /> : null}
-      <div className="drive-assist-row">
-        {items.map((item) => {
-          const pending = !!busy && !!pendingLabel && pendingLabel.includes(item.label);
-          // 滞回：避免跟驰起伏时在「加速/巡航」间来回切
-          const climbing = item.key === "acc" && item.on && smoothSpeed < setSpd - 8;
-          const parking = item.key === "autopark" && item.on && speed >= 0.3 && !inPark;
-          const parkedDone = item.key === "autopark" && item.on && inPark && speed < 0.3;
-          const blocked = !item.on ? item.blocked : null;
-          const status = pending
-            ? "正在执行"
-            : blocked
-              ? blocked
-              : climbing
-                ? "加速跟驰中"
-                : parking
-                  ? "正在泊车"
-                  : parkedDone
-                    ? "泊车完成"
-                    : item.on
-                      ? item.key === "acc"
-                        ? `设定 ${Math.round(setSpd)}`
-                        : item.key === "auto_hold"
-                          ? "待命刹停"
-                          : "已启用"
-                      : "关闭";
-          return (
-            <button
-              key={item.key}
-              type="button"
-              className={`drive-assist-cell${item.on ? " on" : ""}${pending || climbing || parking ? " busy" : ""}${blocked ? " locked" : ""}`}
-              aria-pressed={item.on}
-              title={blocked || undefined}
-              onClick={() => {
-                if (blocked) return;
-                const enabling = !item.on;
-                const needConfirm = !!item.confirm && (enabling || !!item.confirmOffLabel);
-                onControl(
-                  "driving.set_adas",
-                  { feature: item.feature, enable: enabling },
-                  needConfirm
-                    ? {
-                        confirmHigh: true,
-                        label: enabling
-                          ? item.confirmLabel || `确认开启${item.label}？`
-                          : item.confirmOffLabel || `确认关闭${item.label}？`,
-                      }
-                    : { label: `${enabling ? "开启" : "关闭"}${item.label}` },
-                );
-              }}
-            >
-              <span className="drive-assist-code">{item.code}</span>
-              <span className="drive-assist-name">{item.label}</span>
-              <strong>{status}</strong>
-              {item.key === "acc" ? (
-                <span className="drive-assist-meter" aria-hidden>
-                  <motion.i
-                    initial={false}
-                    animate={{ width: `${meterPct}%` }}
-                    transition={{ type: "spring", stiffness: 70, damping: 22 }}
-                  />
-                </span>
-              ) : (
-                <span className="drive-assist-meter ghost" aria-hidden />
-              )}
-            </button>
-          );
-        })}
-      </div>
-    </section>
+    </article>
   );
 }
 
@@ -1551,18 +1202,16 @@ function SharedDeck({
   vehicle,
   onControl,
   busy,
-  pendingLabel,
+  weather,
 }: {
   vehicle: CabinStateSnapshot | null;
-  onControl: (tool: string, args?: Record<string, unknown>, opts?: { confirmHigh?: boolean; label?: string }) => void;
+  onControl: ControlFn;
   busy?: boolean;
-  pendingLabel?: string | null;
+  weather?: WeatherPayload | null;
 }) {
   const media = vehicle?.media;
   const nav = vehicle?.navigation;
-  const adas = vehicle?.driving?.adas || {};
   const apps = vehicle?.apps;
-  const dyn = vehicle?.dynamics;
   const music = media?.music;
   const radio = media?.radio;
   const playing = !!music?.playing;
@@ -1583,12 +1232,19 @@ function SharedDeck({
   const notes = vehicle?.notifications;
   const wifiOn = !!conn?.wifi?.on;
   const wifiSsid = conn?.wifi?.ssid || "手机热点";
-  const cell = conn?.cellular;
   const messages = notes?.messages || [];
   const unreadList = messages.filter((m) => !m.read);
   const unread = unreadList.length;
   const missed = Number(notes?.missed_calls || 0);
   const phoneStatus = notes?.phone_status || "空闲";
+  const weatherLine = weather?.ok
+    ? [weather.place, weather.summary].filter(Boolean).join(" · ")
+    : weather?.summary || "天气加载中…";
+  const weatherTitle = weather?.ok
+    ? [weather.weather, weather.temperature ? `${weather.temperature}°` : "", weather.wind, weather.humidity ? `湿度${weather.humidity}%` : ""]
+        .filter(Boolean)
+        .join(" · ")
+    : weather?.error || "正在获取当前位置天气";
 
   const openInbox = (e?: MouseEvent) => {
     e?.stopPropagation();
@@ -1602,19 +1258,6 @@ function SharedDeck({
 
   return (
     <section className="shared-deck" aria-label="共享状态">
-      <DriveAssistStrip
-        adas={adas}
-        speed={dyn?.speed_kmh ?? 0}
-        cruiseSet={dyn?.cruise_set_kmh}
-        cruiseTarget={dyn?.cruise_target_kmh}
-        parked={dyn?.parked}
-        gear={dyn?.gear}
-        busy={busy}
-        pendingLabel={pendingLabel}
-        navMode={nav?.mode || (nav?.navigating ? "navigating" : undefined)}
-        onControl={onControl}
-      />
-
       <div className="deck-bento">
         <MediaDeck
           title={title}
@@ -1648,28 +1291,90 @@ function SharedDeck({
             }
           }}
         >
-          <em>导航</em>
-          <strong>{livePlace}</strong>
-          <span>
-            {nav?.navigating
-              ? [
-                  nav.destination ? `前往 ${nav.destination}` : "导航中",
-                  nav.eta_min != null ? `约 ${nav.eta_min} 分` : null,
-                  remainKm,
-                ]
-                  .filter(Boolean)
-                  .join(" · ")
-              : "未开启导航"}
-          </span>
-          <div className="deck-nav-actions" onClick={(e) => e.stopPropagation()}>
-            <button type="button" className="deck-inline-btn" onClick={() => setMapOpen((v) => !v)}>
-              {mapOpen ? "收起地图" : "展开地图"}
-            </button>
-            {nav?.navigating ? (
-              <button type="button" className="deck-inline-btn" onClick={() => onControl("navigation.stop", {})}>
-                结束导航
+          <header className="deck-nav-head">
+            <div className="deck-nav-kicker">
+              <em>导航</em>
+              <b className={`deck-nav-state${nav?.navigating ? " on" : ""}${nav?.arrived && !nav?.navigating ? " arrived" : ""}`}>
+                {nav?.navigating
+                  ? "导航中"
+                  : nav?.arrived
+                    ? "已到达"
+                    : nav?.mode === "cruising"
+                      ? "巡航"
+                      : "待命"}
+              </b>
+            </div>
+            <div className="deck-nav-actions" onClick={(e) => e.stopPropagation()}>
+              <button type="button" className="deck-inline-btn" onClick={() => setMapOpen((v) => !v)}>
+                {mapOpen ? "收起" : "地图"}
               </button>
-            ) : null}
+              {nav?.navigating ? (
+                <button type="button" className="deck-inline-btn danger" onClick={() => onControl("navigation.stop", {})}>
+                  结束
+                </button>
+              ) : null}
+            </div>
+          </header>
+
+          <div className="deck-nav-main">
+            <strong title={nav?.navigating ? nav.destination || livePlace : livePlace}>
+              {nav?.navigating ? nav.destination || "目的地" : "未设定导航"}
+            </strong>
+            <span>
+              {nav?.navigating
+                ? `目前所在 · ${livePlace}`
+                : `当前位置 · ${livePlace}`}
+            </span>
+          </div>
+
+          <div className="deck-nav-metrics" aria-label="导航摘要">
+            {nav?.navigating ? (
+              <>
+                <div>
+                  <em>剩余</em>
+                  <strong>{remainKm || "—"}</strong>
+                </div>
+                <div>
+                  <em>预计</em>
+                  <strong>{nav.eta_min != null ? `${nav.eta_min} 分` : "—"}</strong>
+                </div>
+                <div>
+                  <em>路况</em>
+                  <strong>{nav.traffic || "畅通"}</strong>
+                </div>
+              </>
+            ) : (
+              <>
+                <div>
+                  <em>起点</em>
+                  <strong>我的位置</strong>
+                </div>
+                <div>
+                  <em>终点</em>
+                  <strong>未设定</strong>
+                </div>
+                <div>
+                  <em>路况</em>
+                  <strong>{nav?.traffic || "畅通"}</strong>
+                </div>
+              </>
+            )}
+          </div>
+
+          <div className={`deck-nav-progress${nav?.navigating ? " on" : ""}`} aria-hidden>
+            <i
+              style={{
+                width: nav?.navigating
+                  ? `${Math.max(
+                      6,
+                      Math.min(
+                        100,
+                        ((Number(nav.progress_m) || 0) / Math.max(1, Number(nav.distance_m) || 1)) * 100,
+                      ),
+                    )}%`
+                  : "18%",
+              }}
+            />
           </div>
         </article>
 
@@ -1691,13 +1396,9 @@ function SharedDeck({
               <b>Wi‑Fi</b>
               <i>{wifiOn ? `已连接 · ${wifiSsid}` : "未连接"}</i>
             </button>
-            <div className="deck-sys-row static">
-              <b>蜂窝</b>
-              <i>
-                {cell?.on === false
-                  ? "未连接"
-                  : `${cell?.carrier || "运营商"} ${cell?.type || "5G"}`}
-              </i>
+            <div className="deck-sys-row static" title={weatherTitle}>
+              <b>天气</b>
+              <i>{weatherLine}</i>
             </div>
             <button type="button" className="deck-sys-row" onClick={openInbox}>
               <b>消息</b>
@@ -1818,7 +1519,7 @@ function SeatCabinStudio({
   vehicle: CabinStateSnapshot | null;
   selected: SeatId;
   onSelect: (id: SeatId) => void;
-  onControl: (tool: string, args?: Record<string, unknown>, opts?: { confirmHigh?: boolean; label?: string }) => void;
+  onControl: ControlFn;
 }) {
   const climate = vehicle?.climate;
   const seats = vehicle?.seats;
@@ -1846,16 +1547,27 @@ function SeatCabinStudio({
 
   const seatOrder: SeatId[] = ["front_left", "front_right", "rear_left", "rear_middle", "rear_right"];
   const winRef = useRef<HTMLButtonElement | null>(null);
+  const [winDragging, setWinDragging] = useState(false);
+  const winDraggingRef = useRef(false);
+  const [localWin, setLocalWin] = useState(windowPct ?? 0);
+  const winHoldUntil = useRef(0);
+
+  useEffect(() => {
+    if (winDraggingRef.current) return;
+    if (performance.now() < winHoldUntil.current) return;
+    if (windowPct != null) setLocalWin(windowPct);
+  }, [windowPct, selected]);
 
   const setWindowFromClientX = (clientX: number) => {
-    const el = winRef.current;
-    if (!el || !windowKey) return;
-    const rect = el.getBoundingClientRect();
-    const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / Math.max(rect.width, 1)));
-    onControl("cabin.set_windows", {
-      percent: Math.round(ratio * 100),
-      positions: [windowKey],
-    });
+    if (!windowKey) return;
+    const pct = sliderRatio(winRef.current, clientX) * 100;
+    winHoldUntil.current = performance.now() + 420;
+    setLocalWin(pct);
+    onControl(
+      "cabin.set_windows",
+      { percent: Math.round(pct), positions: [windowKey] },
+      { live: true },
+    );
   };
 
   return (
@@ -1943,14 +1655,14 @@ function SeatCabinStudio({
         })}
       </div>
 
-      <AnimatePresence mode="wait">
+      <AnimatePresence mode="wait" initial={false}>
         <motion.div
           key={selected}
           className="seat-panel"
-          initial={{ opacity: 0, y: 8 }}
-          animate={{ opacity: 1, y: 0 }}
-          exit={{ opacity: 0, y: -4 }}
-          transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          transition={{ duration: 0.16 }}
         >
           <div className="seat-panel-head">
             <div>
@@ -2049,34 +1761,45 @@ function SeatCabinStudio({
           <div className={`seat-window${windowPct == null ? " mute" : ""}`}>
             <div className="seat-window-meta">
               <span className="seat-label">车窗</span>
-              <strong className="seat-value">{windowPct != null ? `${windowPct}%` : "—"}</strong>
+              <strong className="seat-value">
+                {windowPct != null ? `${Math.round(localWin)}%` : "—"}
+              </strong>
             </div>
             {windowPct != null ? (
               <button
                 ref={winRef}
                 type="button"
-                className="seat-window-track"
+                className={`seat-window-track${winDragging ? " dragging" : ""}`}
                 aria-label="调节车窗"
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={Math.round(localWin)}
                 onPointerDown={(e) => {
                   e.currentTarget.setPointerCapture(e.pointerId);
+                  winDraggingRef.current = true;
+                  setWinDragging(true);
                   setWindowFromClientX(e.clientX);
                 }}
                 onPointerMove={(e) => {
-                  if (!e.currentTarget.hasPointerCapture(e.pointerId)) return;
+                  if (!winDraggingRef.current) return;
                   setWindowFromClientX(e.clientX);
                 }}
+                onPointerUp={() => {
+                  winDraggingRef.current = false;
+                  setWinDragging(false);
+                }}
+                onPointerCancel={() => {
+                  winDraggingRef.current = false;
+                  setWinDragging(false);
+                }}
               >
-                <motion.i
+                <i
                   className="seat-window-fill"
-                  initial={false}
-                  animate={{ width: `${Math.max(0, Math.min(100, windowPct))}%` }}
-                  transition={{ type: "spring", stiffness: 140, damping: 22 }}
+                  style={{ width: `${Math.max(0, Math.min(100, localWin))}%` }}
                 />
-                <motion.em
+                <em
                   className="seat-window-thumb"
-                  initial={false}
-                  animate={{ left: `${Math.max(0, Math.min(100, windowPct))}%` }}
-                  transition={{ type: "spring", stiffness: 140, damping: 22 }}
+                  style={{ left: `${Math.max(0, Math.min(100, localWin))}%` }}
                 />
               </button>
             ) : (
@@ -2142,21 +1865,51 @@ export function VehicleConsole() {
   const vehicle = useCabinStore((s) => s.vehicle) as CabinStateSnapshot | null;
   const activeSeat = useCabinStore((s) => s.activeSeat);
   const setActiveSeat = useCabinStore((s) => s.setActiveSeat);
-  const { run, tick, busy, pendingLabel } = useVehicleControl();
+  const sessionId = useCabinStore((s) => s.sessionId) || "default";
+  const { run, tick, busy } = useVehicleControl();
   const dyn = vehicle?.dynamics;
   const speed = dyn?.speed_kmh ?? 0;
+  const [weather, setWeather] = useState<WeatherPayload | null>(null);
+  const posBucket = useMemo(() => {
+    const p = vehicle?.navigation?.position;
+    if (p?.lng == null || p?.lat == null) return "default";
+    return `${Number(p.lng).toFixed(2)},${Number(p.lat).toFixed(2)}`;
+  }, [vehicle?.navigation?.position?.lng, vehicle?.navigation?.position?.lat]);
 
   useEffect(() => {
+    const ac = new AbortController();
     const id = window.setInterval(() => {
-      void tick();
-    }, 250);
-    return () => window.clearInterval(id);
+      if (document.hidden) return;
+      void tick(ac.signal);
+    }, 400);
+    return () => {
+      window.clearInterval(id);
+      ac.abort();
+    };
   }, [tick]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const w = await fetchWeather(sessionId);
+        if (!cancelled) setWeather(w);
+      } catch {
+        if (!cancelled) setWeather({ ok: false, summary: "天气暂不可用" });
+      }
+    };
+    void load();
+    const id = window.setInterval(() => void load(), WEATHER_POLL_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [sessionId, posBucket]);
 
   const onControl = (
     tool: string,
     args: Record<string, unknown> = {},
-    opts?: { confirmHigh?: boolean; label?: string },
+    opts?: ControlOpts,
   ) => {
     void run(tool, args, opts);
   };
@@ -2173,22 +1926,14 @@ export function VehicleConsole() {
           battery={vehicle?.driving?.battery_percent ?? 0}
           rangeKm={vehicle?.driving?.range_km}
           driveMode={vehicle?.driving?.mode}
-          childLock={!!dyn?.child_lock}
-          laneKeep={!!vehicle?.driving?.adas?.lane_keep}
-          collisionWarning={!!vehicle?.driving?.adas?.collision_warning}
-          autopark={!!vehicle?.driving?.adas?.autopark}
-          doorsLocked={Object.values(vehicle?.cabin?.doors || {}).every((d) => d?.locked !== false)}
-          chargePortOpen={!!vehicle?.cabin?.charge_port?.open}
-          navMode={vehicle?.navigation?.mode || (vehicle?.navigation?.navigating ? "navigating" : undefined)}
-          navDestination={vehicle?.navigation?.destination}
-          navEta={vehicle?.navigation?.eta_min}
+          outsideTemp={weather?.ok ? weather.temperature : null}
           onControl={onControl}
         />
         <SharedDeck
           vehicle={vehicle}
           onControl={onControl}
           busy={busy}
-          pendingLabel={pendingLabel}
+          weather={weather}
         />
         <SeatCabinStudio
           vehicle={vehicle}

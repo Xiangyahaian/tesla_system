@@ -1,0 +1,33 @@
+{
+  "cases": [
+    {"id": "P-01", "cat": "persona", "q": "希望你说话专业一点，少寒暄套话", "expect": {"persona_updated": true, "tone": "professional"}},
+    {"id": "P-02", "cat": "persona", "q": "温柔一点说话", "expect": {"persona_updated": true, "tone": "gentle"}},
+    {"id": "P-03", "cat": "persona", "q": "轻松活泼点，可以适度俏皮", "expect": {"persona_updated": true, "tone": "playful"}},
+    {"id": "P-04", "cat": "persona", "q": "回复尽量简短干练", "expect": {"persona_updated": true, "tone": "concise"}},
+    {"id": "P-05", "cat": "persona", "q": "别用emoji，也别卖萌", "expect": {"persona_updated": true}},
+    {"id": "M-01", "cat": "memory", "q": "我家住在望京", "expect": {"memories_updated": true, "memory_contains": "望京"}},
+    {"id": "M-02", "cat": "memory", "q": "我女儿叫小雨", "expect": {"memories_updated": true, "memory_contains": "小雨"}},
+    {"id": "M-03", "cat": "memory", "q": "我在中关村软件园上班", "expect": {"memories_updated": true, "memory_contains": "中关村"}},
+    {"id": "M-04", "cat": "memory", "q": "我老婆叫小美", "expect": {"memories_updated": true, "memory_contains": "小美"}},
+    {"id": "F-01", "cat": "preferences", "q": "以后叫我老板", "expect": {"preferences_updated": true}},
+    {"id": "F-02", "cat": "preferences", "q": "以后我坐副驾，空调默认22度", "expect": {"preferences_updated": true, "preferred_seat": "front_right", "temp": 22}},
+    {"id": "F-03", "cat": "preferences", "q": "以后空调全开21度", "expect": {"preferences_updated": true, "temp": 21}},
+    {"id": "F-04", "cat": "preferences", "q": "我平时喜欢听民谣", "expect": {"preferences_updated": true}},
+    {"id": "F-05", "cat": "preferences", "q": "习惯坐主驾，温度24度", "expect": {"preferences_updated": true, "preferred_seat": "front_left", "temp": 24}},
+    {"id": "N-01", "cat": "negative", "q": "打开空调", "expect": {"no_profile_update": true}},
+    {"id": "N-02", "cat": "negative", "q": "今天天气真好", "expect": {"no_profile_update": true}},
+    {"id": "N-03", "cat": "negative", "q": "空调现在多少度", "expect": {"no_profile_update": true}},
+    {"id": "N-04", "cat": "negative", "q": "现在调到26度", "expect": {"no_profile_update": true}},
+    {"id": "N-05", "cat": "negative", "q": "胎压怎么看", "expect": {"no_profile_update": true}},
+    {"id": "T-01", "cat": "mixed", "q": "说话简洁点，我家在国贸，以后音乐偏好周杰伦", "expect": {"persona_updated": true, "memories_updated": true, "preferences_updated": true}},
+    {"id": "T-02", "cat": "mixed", "q": "希望你专业点，公司在中关村，以后左后默认23度", "expect": {"persona_updated": true, "memories_updated": true, "preferences_updated": true}},
+    {"id": "R-01", "cat": "regression", "q": "我坐副驾，喜欢22度", "expect": {"observe": true, "note": "控车+偏好：记录是否落盘"}},
+    {"id": "M-05", "cat": "memory", "q": "我搬家了，现在住在国贸", "expect": {"memories_updated": true, "memory_contains": "国贸"}},
+    {"id": "F-06", "cat": "preferences", "q": "还是喜欢22度吧", "expect": {"observe": true}},
+    {"id": "C-P01", "cat": "clear", "q": "忘掉我的人设，恢复默认说话方式", "expect": {"persona_default": true}},
+    {"id": "C-M01", "cat": "clear", "q": "忘掉我女儿的名字", "expect": {"memory_not_contains": "小雨"}},
+    {"id": "C-F01", "cat": "clear", "q": "忘记我的偏好", "expect": {"prefs_cleared": true}},
+    {"id": "V-01", "cat": "verify", "q": "我叫什么", "expect": {"observe": true}},
+    {"id": "V-02", "cat": "verify", "q": "我家在哪", "expect": {"observe": true}}
+  ]
+}
