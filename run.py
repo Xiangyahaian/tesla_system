@@ -1,22 +1,15 @@
 # -*- coding: utf-8 -*-
-"""Cabin Runtime entrypoint — ``python run.py``."""
+"""Project entrypoint: ``python run.py``."""
 from __future__ import annotations
 
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+_ROOT = Path(__file__).resolve().parent
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
 
-
-def main() -> None:
-    from app.banner import print_banner
-    from app.api.server import main as serve
-
-    print_banner()
-    serve()
-
+from app.api.server import main
 
 if __name__ == "__main__":
     main()

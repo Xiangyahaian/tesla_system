@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import sys
 import threading
@@ -21,7 +22,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Streamin
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from app import config
+from app import __version__, config
 from app.auth import (
     deny_unless_admin,
     deny_unless_can_manage,
@@ -40,7 +41,9 @@ from app.orchestrator.runtime import get_orchestrator
 from app.session.store import get_session_store
 from app.tools.registry import get_registry
 
-app = FastAPI(title="Tesla Cabin Runtime", version="3.0.0")
+logger = logging.getLogger("tesla.cabin")
+
+app = FastAPI(title="Tesla Cabin Runtime", version=__version__)
 # legacy webui 模板
 templates = Jinja2Templates(directory=str(config.WEBUI_DIR))
 CABIN_DIST = config.FRONTEND_DIST
@@ -64,10 +67,11 @@ async def startup():
             ok = get_rag_service().warmup()
             rag_status = "ready" if ok else "unavailable"
         except Exception as e:
-            rag_status = f"warmup failed ({e})"
+            rag_status = "warmup_failed"
+            logger.warning("RAG warmup failed: %s", e)
 
-    hmi = "cabin" if (HAS_CABIN_HMI and config.PREFER_CABIN_HMI) else "legacy"
-    print(f"startup complete  rag={rag_status}  ui={hmi}", flush=True)
+    ui = "cabin" if (HAS_CABIN_HMI and config.PREFER_CABIN_HMI) else "legacy"
+    logger.info("ready  version=%s  rag=%s  ui=%s", __version__, rag_status, ui)
 
 
 @app.get("/", response_class=HTMLResponse)
