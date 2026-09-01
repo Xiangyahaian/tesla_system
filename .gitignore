@@ -66,11 +66,7 @@ RAG-Retrieval/**/*.safetensors
 
 # ===== local reports / eval dumps / scratch =====
 reports/
-test/results/
-test/eval_results/
-test/ragas_results/
-test/*_report.md
-test/*_report.html
+test/
 test.md
 
 # ===== OS / IDE =====

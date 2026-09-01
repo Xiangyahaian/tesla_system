@@ -40,7 +40,6 @@ FastAPI  （python run.py · 默认 :6006）
 | `src/` | RAG 所用的检索 / 精排 / PDF 管线 |
 | `data/` | 手册与评测语料（本地索引已 gitignore） |
 | `tests/` | 单元测试 |
-| `test/` | 集成 / 压测用例与脚本 |
 | `docs/` | 产品、设计、演示与架构文档 |
 | `scripts/` | 离线评测工具 |
 | `state/` | 运行时状态（仅本地；勿提交密钥与会话库） |
@@ -135,8 +134,6 @@ cd frontend && npm run dev    # 终端 2（:5173）
 ```bash
 python -m unittest discover -s tests -v
 ```
-
-压测 / 画像类脚本在 `test/` 下（需已配置可用的模型端点）。
 
 ---
 
