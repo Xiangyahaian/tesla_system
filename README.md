@@ -72,6 +72,27 @@ Never commit `.env`, private keys, or personal API tokens.
 
 ---
 
+## Docker deployment
+
+Production-oriented Compose stack (app + MongoDB). Models, indexes, and Mongo data are **mounted at runtime** (not in the image).
+
+```bash
+cp .env.example .env    # fill API keys and VLLM_API_BASE
+make up-gpu             # requires NVIDIA Container Toolkit for handbook RAG
+open http://127.0.0.1:6006
+```
+
+| File | Purpose |
+|------|---------|
+| `Dockerfile` | Multi-stage build (React HMI + PyTorch CUDA runtime) |
+| `docker-compose.yml` | App + MongoDB |
+| `docker-compose.gpu.yml` | GPU reservation for RAG |
+| `docs/docker.md` | Full deployment guide (volumes, vLLM, troubleshooting) |
+
+vLLM is typically run **outside** the app container; point `VLLM_API_BASE` at the host (`host.docker.internal`) or an internal GPU server.
+
+---
+
 ## Quick start
 
 ```bash

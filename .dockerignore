@@ -1,0 +1,71 @@
+# Git / IDE
+.git
+.gitignore
+.github
+.idea
+.vscode
+*.swp
+.DS_Store
+
+# Secrets & local-only
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+config.ini
+langsmith.txt
+ali.txt
+aliyun.txt
+start.txt
+常用命令.txt
+
+# Python / Node caches
+__pycache__
+*.py[cod]
+*$py.class
+.venv
+venv
+.ipynb_checkpoints
+frontend/node_modules
+
+# Large local artifacts (mount at runtime)
+models/
+data/mongodb/
+data/saved_index/*.db
+data/saved_index/*.pkl
+data/saved_index/.milvus.db.lock
+RAG-Retrieval/**/output/
+RAG-Retrieval/**/runs/
+RAG-Retrieval/**/checkpoints/
+RAG-Retrieval/**/*.bin
+RAG-Retrieval/**/*.pt
+RAG-Retrieval/**/*.safetensors
+
+# Bundled binaries / infra not needed in image
+mongodb-7.0.20/
+frp_*/
+vllm_depoly/
+*.deb
+*.tar.gz
+
+# Reports / eval / scratch
+reports/
+test/results/
+test/eval_results/
+test/ragas_results/
+test/*_report.md
+test/*_report.html
+
+# Legacy / unpublished
+skills/
+skill/
+webui/
+impeccable/
+
+# Docker build context noise
+docker-compose*.yml
+compose*.yaml
+Dockerfile*
+Makefile
+docs/prelaunch_audit*.md

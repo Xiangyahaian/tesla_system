@@ -1,0 +1,81 @@
+# Tesla System — production-oriented Compose stack
+# Usage:
+#   cp .env.example .env && edit secrets
+#   docker compose up -d --build
+# GPU (RAG): docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build
+
+name: tesla-system
+
+services:
+  mongodb:
+    image: mongo:7.0
+    container_name: tesla-mongodb
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_DATABASE: ${MONGO_DB_NAME:-mydatabase}
+    ports:
+      - "${MONGO_PUBLISH_PORT:-27017}:27017"
+    volumes:
+      # Option A: named volume (empty first boot — import manual_text separately)
+      - mongodb_data:/data/db
+      # Option B: bind existing WiredTiger data (uncomment, comment mongodb_data above)
+      # - ./data/mongodb/data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 8
+      start_period: 25s
+    networks:
+      - tesla_net
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ${TESLA_IMAGE:-tesla-system:latest}
+    container_name: tesla-app
+    restart: unless-stopped
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      APP_HOST: 0.0.0.0
+      APP_PORT: "6006"
+      MONGO_HOST: mongodb
+      MONGO_PORT: "27017"
+      MONGO_DB_NAME: ${MONGO_DB_NAME:-mydatabase}
+      # vLLM on host machine (WSL2 / Linux)
+      VLLM_API_BASE: ${VLLM_API_BASE:-http://host.docker.internal:8000/v1}
+    ports:
+      - "${APP_PUBLISH_PORT:-6006}:6006"
+    volumes:
+      # Required for handbook RAG (not baked into image — too large)
+      - ${MODELS_DIR:-./models}:/app/models:ro
+      - ${SAVED_INDEX_DIR:-./data/saved_index}:/app/data/saved_index
+      - ${SAVED_IMAGES_DIR:-./data/saved_images}:/app/data/saved_images:ro
+      - ${RERANKER_CHECKPOINT_DIR:-./RAG-Retrieval/rag_retrieval/train/reranker/output/bert/runs/checkpoints/checkpoint_0}:/app/RAG-Retrieval/rag_retrieval/train/reranker/output/bert/runs/checkpoints/checkpoint_0:ro
+      - tesla_state:/app/state
+      - tesla_log:/app/log
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:6006/api/model-status"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 180s
+    networks:
+      - tesla_net
+
+networks:
+  tesla_net:
+    driver: bridge
+
+volumes:
+  mongodb_data:
+  tesla_state:
+  tesla_log:
