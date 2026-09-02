@@ -23,7 +23,7 @@ dataclasses-json==0.6.7
 pymilvus.model==0.3.2
 langchain-core==0.3.63
 langchain-text-splitters==0.3.8
-transformers==4.51.1d
+transformers==4.51.1
 huggingface-hub==0.32.3
 tokenizers==0.21.1
 safetensors==0.5.3
